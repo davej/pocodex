@@ -466,6 +466,16 @@ html[data-pocodex="true"] [aria-label="Open in Popout Window"] {
     font-size: 16px !important;
   }
 
+  html[data-pocodex="true"]
+    nav[role="navigation"]
+    [role="listitem"]
+    div[class*="opacity-0"]:has(
+      button[aria-label^="Project actions for "],
+      button[aria-label^="Start new thread in "]
+    ) {
+    opacity: 1 !important;
+  }
+
   html[data-pocodex="true"] [data-pocodex-import-backdrop] {
     align-items: stretch;
     padding: 12px;

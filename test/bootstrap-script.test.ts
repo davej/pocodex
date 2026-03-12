@@ -263,7 +263,7 @@ describe("renderBootstrapScript", () => {
     });
   });
 
-  it("closes the mobile sidebar after clicking a thread in the sidebar", () => {
+  it("closes the mobile sidebar after clicking thread and new-thread navigation in the sidebar", () => {
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -306,6 +306,8 @@ describe("renderBootstrapScript", () => {
       textContent = "";
       style: Record<string, string> = {};
       private readonly attributes = new Map<string, string>();
+      private rectLeft = 0;
+      private rectWidth = 0;
 
       constructor(readonly tagName: string) {
         super();
@@ -387,6 +389,29 @@ describe("renderBootstrapScript", () => {
           return this.id || null;
         }
         return this.attributes.get(name) ?? null;
+      }
+
+      setBoundingClientRect(rect: { left?: number; width?: number }): void {
+        if (typeof rect.left === "number") {
+          this.rectLeft = rect.left;
+        }
+        if (typeof rect.width === "number") {
+          this.rectWidth = rect.width;
+        }
+      }
+
+      getBoundingClientRect() {
+        return {
+          left: this.rectLeft,
+          top: 0,
+          right: this.rectLeft + this.rectWidth,
+          bottom: 0,
+          width: this.rectWidth,
+          height: 0,
+          x: this.rectLeft,
+          y: 0,
+          toJSON: () => null,
+        };
       }
 
       querySelector(selector: string): Element | null {
@@ -641,12 +666,28 @@ describe("renderBootstrapScript", () => {
 
     const nav = document.createElement("nav");
     nav.setAttribute("role", "navigation");
+    const newThreadButton = document.createElement("button");
+    newThreadButton.textContent = "New thread";
+    nav.appendChild(newThreadButton);
+    const projectNewThreadButton = document.createElement("button");
+    projectNewThreadButton.setAttribute("aria-label", "Start new thread in pocodex");
+    nav.appendChild(projectNewThreadButton);
+    const threadList = document.createElement("div");
+    threadList.setAttribute("role", "list");
+    const listItem = document.createElement("div");
+    listItem.setAttribute("role", "listitem");
     const row = document.createElement("div");
     row.setAttribute("role", "button");
+    const rowActions = document.createElement("div");
+    const archiveButton = document.createElement("button");
+    archiveButton.setAttribute("aria-label", "Archive thread");
+    rowActions.appendChild(archiveButton);
     const title = document.createElement("span");
-    title.setAttribute("data-thread-title", "true");
-    row.appendChild(title);
-    nav.appendChild(row);
+    title.textContent = "Close sidebar when opening thread";
+    row.append(rowActions, title);
+    listItem.appendChild(row);
+    threadList.appendChild(listItem);
+    nav.appendChild(threadList);
     document.body.appendChild(nav);
     const contentPane = document.createElement("div");
     contentPane.setAttribute("class", "main-surface");
@@ -697,6 +738,24 @@ describe("renderBootstrapScript", () => {
     expect(dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
 
     dispatchedMessages.length = 0;
+    document.dispatchEvent(new MouseEvent("click", { target: archiveButton }));
+    drainTimers(timers);
+
+    expect(dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+
+    dispatchedMessages.length = 0;
+    document.dispatchEvent(new MouseEvent("click", { target: newThreadButton }));
+    drainTimers(timers);
+
+    expect(dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    dispatchedMessages.length = 0;
+    document.dispatchEvent(new MouseEvent("click", { target: projectNewThreadButton }));
+    drainTimers(timers);
+
+    expect(dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    dispatchedMessages.length = 0;
     document.dispatchEvent(new MouseEvent("click", { target: contentChild }));
     drainTimers(timers);
 
@@ -709,6 +768,15 @@ describe("renderBootstrapScript", () => {
     drainTimers(timers);
 
     expect(dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+
+    dispatchedMessages.length = 0;
+    contentPane.style.width = "";
+    contentPane.style.transform = "";
+    contentPane.setBoundingClientRect({ left: 240, width: 150 });
+    document.dispatchEvent(new MouseEvent("click", { target: newThreadButton }));
+    drainTimers(timers);
+
+    expect(dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
 
     function createNodeList(matches: Element[]) {
       return {
