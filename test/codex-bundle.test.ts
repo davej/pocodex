@@ -100,7 +100,7 @@ describe("codex-bundle", () => {
     await mkdir(join(versionCacheRoot, "__cli", "windows-app"), { recursive: true });
     await writeFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "cached", "utf8");
 
-    asarMock.listPackage.mockReturnValue(["/webview/index.html"]);
+    asarMock.listPackage.mockReturnValue(["/webview/index.html", "/webview/assets/app-test.png"]);
     asarMock.statFile.mockReturnValue({ size: 1 });
     asarMock.extractFile.mockImplementation((_appAsarPath, filename) => {
       if (filename === "package.json") {
@@ -116,6 +116,9 @@ describe("codex-bundle", () => {
       if (filename === "webview/index.html") {
         return Buffer.from("<html>codex</html>", "utf8");
       }
+      if (filename === "webview/assets/app-test.png") {
+        return Buffer.from("png");
+      }
 
       throw new Error(`Unexpected asar extract for ${filename}`);
     });
@@ -123,6 +126,7 @@ describe("codex-bundle", () => {
     const bundle = await loadCodexBundle(appPath);
 
     expect(bundle.webviewRoot).toBe(join(versionCacheRoot, "__webview"));
+    expect(bundle.faviconHref).toBe("./assets/app-test.png");
     await expect(bundle.readIndexHtml()).resolves.toBe("<html>codex</html>");
     await expect(
       readFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "utf8"),

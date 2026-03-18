@@ -15,12 +15,22 @@ describe("patchIndexHtml", () => {
 </html>`;
 
     const bootstrapScript = "window.__POCODEX__ = true;";
-    const patched = patchIndexHtml(html, { bootstrapScript, stylesheetHref: "/pocodex.css" });
+    const patched = patchIndexHtml(html, {
+      bootstrapScript,
+      faviconHref: "./assets/app.png",
+      stylesheetHref: "/pocodex.css",
+    });
     const hash = createHash("sha256").update(bootstrapScript).digest("base64");
 
     expect(patched).toContain(`<script>${bootstrapScript}</script>`);
+    expect(patched).toContain(`<link rel="icon" href="./assets/app.png" id="pocodex-favicon">`);
     expect(patched).toContain(
       `<link rel="stylesheet" href="/pocodex.css" id="pocodex-stylesheet">`,
+    );
+    expect(
+      patched.indexOf(`<link rel="icon" href="./assets/app.png" id="pocodex-favicon">`),
+    ).toBeLessThan(
+      patched.indexOf(`<script type="module" crossorigin src="./assets/index.js"></script>`),
     );
     expect(patched.indexOf(`<script>${bootstrapScript}</script>`)).toBeLessThan(
       patched.indexOf(`<script type="module" crossorigin src="./assets/index.js"></script>`),

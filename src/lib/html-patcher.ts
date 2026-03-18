@@ -4,15 +4,26 @@ export function patchIndexHtml(
   html: string,
   options: {
     bootstrapScript: string;
+    faviconHref?: string | null;
     stylesheetHref: string;
   },
 ): string {
+  const faviconTag = options.faviconHref
+    ? `<link rel="icon" href="${options.faviconHref}" id="pocodex-favicon">`
+    : "";
   const stylesheetTag = `<link rel="stylesheet" href="${options.stylesheetHref}" id="pocodex-stylesheet">`;
   const bootstrapTag = `<script>${options.bootstrapScript}</script>`;
   const withBootstrap = html.replace(
     /(\s*)(<script type="module"\s+crossorigin\s+src="\.[^"]+"><\/script>)/,
     (_match, indentation, entryScript) =>
-      `${indentation}${stylesheetTag}\n${indentation}${bootstrapTag}\n${indentation}${entryScript}`,
+      [
+        faviconTag ? `${indentation}${faviconTag}` : "",
+        `${indentation}${stylesheetTag}`,
+        `${indentation}${bootstrapTag}`,
+        `${indentation}${entryScript}`,
+      ]
+        .filter((line) => line.length > 0)
+        .join("\n"),
   );
 
   if (withBootstrap === html) {

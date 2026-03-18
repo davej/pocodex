@@ -39,6 +39,7 @@ export interface CodexBundle {
   buildFlavor: string;
   buildNumber: string;
   webviewRoot: string;
+  faviconHref: string | null;
   readIndexHtml: () => Promise<string>;
 }
 
@@ -70,6 +71,7 @@ const execFileAsync = promisify(execFile);
 export async function loadCodexBundle(appPath: string): Promise<CodexBundle> {
   const metadata = await loadCodexDesktopMetadata(appPath);
   const webviewRoot = await ensureWebviewCache(metadata.appAsarPath, metadata.version);
+  const faviconHref = await resolveWebviewFaviconHref(webviewRoot);
 
   return {
     appPath: metadata.appPath,
@@ -77,6 +79,7 @@ export async function loadCodexBundle(appPath: string): Promise<CodexBundle> {
     buildFlavor: metadata.buildFlavor,
     buildNumber: metadata.buildNumber,
     webviewRoot,
+    faviconHref,
     readIndexHtml: async () => readFile(join(webviewRoot, "index.html"), "utf8"),
   };
 }
@@ -278,6 +281,20 @@ async function ensureDesktopWorkerCache(appAsarPath: string, version: string): P
   }
 
   return workerPath;
+}
+
+async function resolveWebviewFaviconHref(webviewRoot: string): Promise<string | null> {
+  const assetsDirectory = join(webviewRoot, "assets");
+  const entries = await readdir(assetsDirectory, { withFileTypes: true }).catch(() => null);
+  if (!entries) {
+    return null;
+  }
+
+  const faviconCandidate = entries.find(
+    (entry) => entry.isFile() && /^app-.*\.(?:png|svg|ico)$/i.test(entry.name),
+  );
+
+  return faviconCandidate ? `./assets/${faviconCandidate.name}` : null;
 }
 
 function cacheRootForVersion(version: string): string {

@@ -72,6 +72,7 @@ async function main(): Promise<void> {
           stylesheetHref: POCODEX_STYLESHEET_HREF,
           importIconSvg: await readFile(importIconSvgPath, "utf8"),
         }),
+        faviconHref: bundle.faviconHref,
         stylesheetHref: POCODEX_STYLESHEET_HREF,
       });
     },
