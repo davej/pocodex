@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { deriveCodexHomePath } from "./codex-home.js";
 
 export interface LoadedPersistedAtomRegistry {
   found: boolean;
@@ -8,8 +9,7 @@ export interface LoadedPersistedAtomRegistry {
 }
 
 export function derivePersistedAtomRegistryPath(): string {
-  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-  return join(codexHome, "pocodex", "persisted-atoms.json");
+  return join(deriveCodexHomePath(), "pocodex", "persisted-atoms.json");
 }
 
 export async function loadPersistedAtomRegistry(

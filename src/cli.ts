@@ -8,14 +8,13 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { AppServerBridge } from "./lib/app-server-bridge.js";
-import { loadCodexBundle } from "./lib/codex-bundle.js";
+import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
 import { renderBootstrapScript } from "./lib/bootstrap-script.js";
 import { patchIndexHtml } from "./lib/html-patcher.js";
 import type { SentryInitOptions, ServeCommandOptions } from "./lib/protocol.js";
 import { getServeUrls } from "./lib/serve-url.js";
 import { PocodexServer } from "./lib/server.js";
 
-const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_LISTEN = "127.0.0.1:8787";
 const POCODEX_STYLESHEET_HREF = "/pocodex.css";
 const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--listen", "--token"]);
@@ -42,7 +41,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const options = parseServeCommand(serveArgv);
+  const options = await parseServeCommand(serveArgv);
   const pocodexCssPath = fileURLToPath(new URL("./pocodex.css", import.meta.url));
   const importIconSvgPath = fileURLToPath(new URL("./images/import.svg", import.meta.url));
   const bundle = await loadCodexBundle(options.appPath);
@@ -120,16 +119,16 @@ async function main(): Promise<void> {
     );
   }
   console.log(`Using Codex ${bundle.version} from ${bundle.appPath}`);
-  console.log(`Using direct app-server bridge from ${options.appPath}`);
+  console.log(`Using direct app-server bridge from ${bundle.appPath}`);
   if (options.devMode) {
     console.log(`Watching ${pocodexCssPath} for stylesheet changes`);
   }
 }
 
-function parseServeCommand(argv: string[]): ServeCommandOptions {
+async function parseServeCommand(argv: string[]): Promise<ServeCommandOptions> {
   validateServeArgs(argv);
 
-  const appPath = readFlag(argv, "--app") ?? DEFAULT_APP_PATH;
+  const appPath = readFlag(argv, "--app") ?? (await resolveDefaultCodexAppPath());
   const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
   const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
@@ -191,9 +190,7 @@ function hasFlag(argv: string[], name: string): boolean {
 
 function printUsage(): void {
   console.error("Usage:");
-  console.error(
-    "  pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]",
-  );
+  console.error("  pocodex [--token <secret>] [--app <path>] [--listen 127.0.0.1:8787] [--dev]");
 }
 
 function watchPocodexStylesheet(cssFilePath: string, onChange: () => void): () => void {

@@ -2,21 +2,23 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import {
   deriveCodexDesktopGlobalStatePath,
   loadCodexDesktopProjects,
 } from "./codex-desktop-projects.js";
+import { ensureCodexCliBinary } from "./codex-bundle.js";
+import { deriveCodexHomePath } from "./codex-home.js";
 import {
   DefaultCodexDesktopGitWorkerBridge,
   type CodexDesktopGitWorkerBridge,
 } from "./codex-desktop-git-worker.js";
 import { debugLog } from "./debug.js";
 import type { HostBridge, JsonRecord } from "./protocol.js";
-import { deriveCodexCliBinaryPath } from "./startup-errors.js";
 import {
   derivePersistedAtomRegistryPath,
   loadPersistedAtomRegistry,
@@ -46,6 +48,7 @@ interface AppServerBridgeOptions {
   persistedAtomRegistryPath?: string;
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
+  codexCliPath?: string;
 }
 
 interface JsonRpcRequest {
@@ -185,20 +188,24 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       },
     });
     this.syncWorkspaceGlobalState();
-    this.child = spawn(
-      deriveCodexCliBinaryPath(options.appPath),
-      ["app-server", "--listen", "stdio://"],
-      {
-        stdio: "pipe",
-      },
-    );
+    const codexCliPath = options.codexCliPath;
+    if (!codexCliPath) {
+      throw new Error("Resolved Codex CLI path is required before starting the app-server bridge.");
+    }
+    this.child = spawn(codexCliPath, ["app-server", "--listen", "stdio://"], {
+      stdio: "pipe",
+    });
 
     this.bindProcess();
     this.bindGitWorker();
   }
 
   static async connect(options: AppServerBridgeOptions): Promise<AppServerBridge> {
-    const bridge = new AppServerBridge(options);
+    const codexCliPath = options.codexCliPath ?? (await ensureCodexCliBinary(options.appPath));
+    const bridge = new AppServerBridge({
+      ...options,
+      codexCliPath,
+    });
     await bridge.restorePersistedAtomRegistry();
     await bridge.restoreWorkspaceRootRegistry();
     await bridge.initialize();
@@ -1155,8 +1162,18 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return {
           status: 200,
           body: {
-            codexHome: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+            codexHome: deriveCodexHomePath(),
           },
+        };
+      case "codex-agents-md":
+        return {
+          status: 200,
+          body: await this.readCodexAgentsMarkdown(),
+        };
+      case "codex-agents-md-save":
+        return {
+          status: 200,
+          body: await this.writeCodexAgentsMarkdown(body),
         };
       case "list-automations":
         return {
@@ -1361,6 +1378,45 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         config: null,
       };
     }
+  }
+
+  private async readCodexAgentsMarkdown(): Promise<{
+    path: string;
+    contents: string;
+  }> {
+    const path = resolveCodexAgentsMarkdownPath();
+
+    try {
+      return {
+        path,
+        contents: await readFile(path, "utf8"),
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return {
+          path,
+          contents: "",
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  private async writeCodexAgentsMarkdown(body: unknown): Promise<{
+    path: string;
+  }> {
+    const contents = readCodexAgentsMarkdownContents(body);
+    if (contents === null) {
+      throw new Error("Missing agents.md contents.");
+    }
+
+    const path = resolveCodexAgentsMarkdownPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, contents, "utf8");
+    return {
+      path,
+    };
   }
 
   private readDeveloperInstructions(body: unknown): string | null {
@@ -1938,6 +1994,23 @@ function normalizeRequestBody(body: unknown): BodyInit | undefined {
 
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function resolveCodexAgentsMarkdownPath(): string {
+  return join(deriveCodexHomePath(), "agents.md");
+}
+
+function readCodexAgentsMarkdownContents(body: unknown): string | null {
+  const params = isJsonRecord(body) && isJsonRecord(body.params) ? body.params : body;
+  if (!isJsonRecord(params) || typeof params.contents !== "string") {
+    return null;
+  }
+
+  return params.contents;
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return isJsonRecord(error) && error.code === "ENOENT";
 }
 
 function uniqueStrings(values: unknown[]): string[] {

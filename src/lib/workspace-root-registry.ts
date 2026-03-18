@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { deriveCodexHomePath } from "./codex-home.js";
 
 export interface WorkspaceRootRegistryState {
   roots: string[];
@@ -15,8 +16,7 @@ export interface LoadedWorkspaceRootRegistry {
 }
 
 export function deriveWorkspaceRootRegistryPath(): string {
-  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-  return join(codexHome, "pocodex", "workspace-roots.json");
+  return join(deriveCodexHomePath(), "pocodex", "workspace-roots.json");
 }
 
 export async function loadWorkspaceRootRegistry(

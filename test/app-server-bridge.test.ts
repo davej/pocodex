@@ -21,6 +21,7 @@ vi.mock("node-pty", () => ({
 let mockLocalThreadListData: unknown[] = [];
 const tempDirs: string[] = [];
 const mockPtys: MockPty[] = [];
+const originalCodexHome = process.env.CODEX_HOME;
 const originalShell = process.env.SHELL;
 const TEST_WORKSPACE_ROOT = process.cwd();
 const TEST_PROJECT_ALPHA_ROOT = join(TEST_WORKSPACE_ROOT, "..", "project-alpha");
@@ -229,6 +230,11 @@ describe("AppServerBridge", () => {
     }
     mockLocalThreadListData = [];
     mockPtys.length = 0;
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
+    }
     process.env.SHELL = originalShell;
     vi.clearAllMocks();
   });
@@ -1074,6 +1080,67 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
+  it("reads and writes personal agents.md content from codex home", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    const agentsPath = join(codexHome, "agents.md");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-agents-read-empty",
+      method: "POST",
+      url: "vscode://codex/codex-agents-md",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-agents-save",
+      method: "POST",
+      url: "vscode://codex/codex-agents-md-save",
+      body: JSON.stringify({
+        params: {
+          contents: "Use concise output.\n",
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-agents-read-saved",
+      method: "POST",
+      url: "vscode://codex/codex-agents-md",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-agents-read-saved")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-agents-read-empty")).toEqual({
+      path: agentsPath,
+      contents: "",
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-agents-save")).toEqual({
+      path: agentsPath,
+    });
+
+    expect(await readFile(agentsPath, "utf8")).toBe("Use concise output.\n");
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-agents-read-saved")).toEqual({
+      path: agentsPath,
+      contents: "Use concise output.\n",
+    });
+
+    await bridge.close();
+  });
+
   it("resolves git origins for repo-backed directories", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-git-origins-"));
     tempDirs.push(tempDirectory);
@@ -1523,6 +1590,7 @@ async function createBridge(
   }
   return AppServerBridge.connect({
     appPath: "/Applications/Codex.app",
+    codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
     codexDesktopGlobalStatePath: options.codexDesktopGlobalStatePath,
     persistedAtomRegistryPath: options.persistedAtomRegistryPath,

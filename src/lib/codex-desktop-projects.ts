@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+
+import { deriveCodexHomePath } from "./codex-home.js";
 
 export interface CodexDesktopProject {
   root: string;
@@ -16,8 +17,7 @@ export interface LoadedCodexDesktopProjects {
 }
 
 export function deriveCodexDesktopGlobalStatePath(): string {
-  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-  return join(codexHome, ".codex-global-state.json");
+  return join(deriveCodexHomePath(), ".codex-global-state.json");
 }
 
 export async function loadCodexDesktopProjects(
