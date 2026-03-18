@@ -32,6 +32,8 @@ describe("loadWorkspaceRootRegistry", () => {
   it("falls back to an existing alternate Codex home", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
     tempDirs.push(tempDirectory);
+    const projectRoot = "/root/workspaces/project-alpha";
+    const projectLabel = "Project Alpha";
 
     const windowsProfile = join(tempDirectory, "windows-profile");
     const fallbackRegistryPath = join(windowsProfile, ".codex", "pocodex", "workspace-roots.json");
@@ -41,11 +43,11 @@ describe("loadWorkspaceRootRegistry", () => {
     process.env.WSL_DISTRO_NAME = "Ubuntu";
 
     await saveWorkspaceRootRegistry(fallbackRegistryPath, {
-      roots: ["/root/repos/xigbclutchix/BlockJsGame"],
+      roots: [projectRoot],
       labels: {
-        "/root/repos/xigbclutchix/BlockJsGame": "BlockJsGame",
+        [projectRoot]: projectLabel,
       },
-      activeRoot: "/root/repos/xigbclutchix/BlockJsGame",
+      activeRoot: projectRoot,
       desktopImportPromptSeen: false,
     });
 
@@ -53,11 +55,11 @@ describe("loadWorkspaceRootRegistry", () => {
       found: true,
       path: fallbackRegistryPath,
       state: {
-        roots: ["/root/repos/xigbclutchix/BlockJsGame"],
+        roots: [projectRoot],
         labels: {
-          "/root/repos/xigbclutchix/BlockJsGame": "BlockJsGame",
+          [projectRoot]: projectLabel,
         },
-        activeRoot: "/root/repos/xigbclutchix/BlockJsGame",
+        activeRoot: projectRoot,
         desktopImportPromptSeen: false,
       },
     });
