@@ -769,6 +769,23 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       return;
     }
 
+    const localResult = await this.handleLocalMcpRequest(message.request);
+    if (localResult.handled) {
+      if (message.request.id !== undefined) {
+        this.emitBridgeMessage({
+          type: "mcp-response",
+          hostId: this.hostId,
+          message: {
+            id: message.request.id,
+            ...(localResult.error !== undefined
+              ? { error: localResult.error }
+              : { result: localResult.result }),
+          },
+        });
+      }
+      return;
+    }
+
     this.sendJsonRpcMessage({
       id: message.request.id,
       method: message.request.method,
@@ -788,12 +805,67 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
+  private async handleLocalMcpRequest(request: JsonRpcRequest): Promise<
+    | {
+        handled: false;
+      }
+    | {
+        handled: true;
+        result?: unknown;
+        error?: { message: string };
+      }
+  > {
+    switch (request.method) {
+      case "thread/archive":
+        return this.handleLocalThreadArchiveRequest(request.params, "thread/archive");
+      case "thread/unarchive":
+        return this.handleLocalThreadArchiveRequest(request.params, "thread/unarchive");
+      default:
+        return {
+          handled: false,
+        };
+    }
+  }
+
+  private async handleLocalThreadArchiveRequest(
+    params: unknown,
+    _method: "thread/archive" | "thread/unarchive",
+  ): Promise<
+    | {
+        handled: true;
+        result: { ok: true };
+      }
+    | {
+        handled: true;
+        error: { message: string };
+      }
+  > {
+    const threadId =
+      isJsonRecord(params) && typeof params.threadId === "string" ? params.threadId : null;
+    if (!threadId) {
+      return {
+        handled: true,
+        error: {
+          message: "Missing threadId.",
+        },
+      };
+    }
+
+    return {
+      handled: true,
+      result: {
+        ok: true,
+      },
+    };
+  }
+
   private async handleThreadArchive(
     message: JsonRecord,
     method: "thread/archive" | "thread/unarchive",
   ): Promise<void> {
     const conversationId =
       typeof message.conversationId === "string" ? message.conversationId : null;
+    const requestId = typeof message.requestId === "string" ? message.requestId : null;
     if (!conversationId) {
       return;
     }
@@ -802,8 +874,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       await this.sendLocalRequest(method, {
         threadId: conversationId,
       });
+      if (requestId) {
+        this.emitBridgeMessage({
+          type: "serverRequest/resolved",
+          params: {
+            threadId: conversationId,
+            requestId,
+          },
+        });
+      }
     } catch (error) {
-      this.emit("error", normalizeError(error));
+      debugLog("app-server", "failed to update thread archive state", {
+        error: normalizeError(error).message,
+        method,
+        threadId: conversationId,
+      });
     }
   }
 

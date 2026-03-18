@@ -19,6 +19,7 @@ vi.mock("node-pty", () => ({
 }));
 
 let mockLocalThreadListData: unknown[] = [];
+const mockLocalRequestErrors = new Map<string, string>();
 const tempDirs: string[] = [];
 const mockPtys: MockPty[] = [];
 const originalCodexHome = process.env.CODEX_HOME;
@@ -128,6 +129,31 @@ class MockChildProcess extends EventEmitter {
             );
           });
         }
+
+        if (
+          String(message.id ?? "").startsWith("pocodex-local-") &&
+          (message.method === "thread/archive" || message.method === "thread/unarchive")
+        ) {
+          setImmediate(() => {
+            const errorMessage = mockLocalRequestErrors.get(message.method);
+            this.stdout.write(
+              `${JSON.stringify({
+                id: message.id,
+                ...(errorMessage
+                  ? {
+                      error: {
+                        message: errorMessage,
+                      },
+                    }
+                  : {
+                      result: {
+                        ok: true,
+                      },
+                    }),
+              })}\n`,
+            );
+          });
+        }
       }
     });
   }
@@ -229,6 +255,7 @@ describe("AppServerBridge", () => {
       await rm(directory, { recursive: true, force: true });
     }
     mockLocalThreadListData = [];
+    mockLocalRequestErrors.clear();
     mockPtys.length = 0;
     if (originalCodexHome === undefined) {
       delete process.env.CODEX_HOME;
@@ -647,6 +674,113 @@ describe("AppServerBridge", () => {
       type: "pocodex-open-desktop-import-dialog",
       mode: "manual",
     });
+
+    await bridge.close();
+  });
+
+  it("does not emit a top-level error when archiving a thread fails", async () => {
+    mockLocalRequestErrors.set("thread/archive", "Thread not found");
+    const bridge = await createBridge(children);
+    const errors: Error[] = [];
+    bridge.on("error", (error) => {
+      errors.push(error);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "archive-thread",
+      conversationId: "thr_test",
+      requestId: "archive-1",
+    });
+
+    await waitForCondition(() =>
+      (children.at(-1)?.writes ?? "").includes('"method":"thread/archive"'),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(errors).toEqual([]);
+
+    await bridge.close();
+  });
+
+  it("resolves archive requests for the desktop webview after archiving succeeds", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "archive-thread",
+      conversationId: "thr_test",
+      requestId: "archive-1",
+    });
+
+    await waitForCondition(() =>
+      emittedMessages.some(
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: unknown }).type === "serverRequest/resolved",
+      ),
+    );
+
+    expect(emittedMessages).toContainEqual({
+      type: "serverRequest/resolved",
+      params: {
+        threadId: "thr_test",
+        requestId: "archive-1",
+      },
+    });
+
+    await bridge.close();
+  });
+
+  it("handles archive mcp requests locally for the desktop webview", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    const child = children.at(-1);
+    const writesBefore = child?.writes ?? "";
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "req-archive-1",
+        method: "thread/archive",
+        params: {
+          threadId: "thr_test",
+        },
+      },
+    });
+
+    await waitForCondition(() =>
+      emittedMessages.some(
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: unknown }).type === "mcp-response",
+      ),
+    );
+
+    expect(emittedMessages).toContainEqual({
+      type: "mcp-response",
+      hostId: "local",
+      message: {
+        id: "req-archive-1",
+        result: {
+          ok: true,
+        },
+      },
+    });
+    expect((child?.writes ?? "").slice(writesBefore.length)).not.toContain('"id":"req-archive-1"');
+    expect((child?.writes ?? "").slice(writesBefore.length)).not.toContain(
+      '"method":"thread/archive"',
+    );
 
     await bridge.close();
   });
