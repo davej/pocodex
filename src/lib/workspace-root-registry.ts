@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { deriveCodexHomePath } from "./codex-home.js";
+import { deriveCodexHomePath, listCodexHomePathCandidates } from "./codex-home.js";
 
 export interface WorkspaceRootRegistryState {
   roots: string[];
@@ -12,6 +12,7 @@ export interface WorkspaceRootRegistryState {
 
 export interface LoadedWorkspaceRootRegistry {
   found: boolean;
+  path: string;
   state: WorkspaceRootRegistryState | null;
 }
 
@@ -22,21 +23,27 @@ export function deriveWorkspaceRootRegistryPath(): string {
 export async function loadWorkspaceRootRegistry(
   registryPath: string,
 ): Promise<LoadedWorkspaceRootRegistry> {
-  try {
-    const raw = await readFile(registryPath, "utf8");
-    return {
-      found: true,
-      state: parseWorkspaceRootRegistry(raw),
-    };
-  } catch (error) {
-    if (isMissingFileError(error)) {
+  for (const candidatePath of listWorkspaceRootRegistryPathCandidates(registryPath)) {
+    try {
+      const raw = await readFile(candidatePath, "utf8");
       return {
-        found: false,
-        state: null,
+        found: true,
+        path: candidatePath,
+        state: parseWorkspaceRootRegistry(raw),
       };
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+
+  return {
+    found: false,
+    path: registryPath,
+    state: null,
+  };
 }
 
 export async function saveWorkspaceRootRegistry(
@@ -115,4 +122,20 @@ function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function listWorkspaceRootRegistryPathCandidates(registryPath: string): string[] {
+  const candidates = [registryPath];
+  if (registryPath !== deriveWorkspaceRootRegistryPath()) {
+    return candidates;
+  }
+
+  for (const codexHome of listCodexHomePathCandidates()) {
+    const candidatePath = join(codexHome, "pocodex", "workspace-roots.json");
+    if (!candidates.includes(candidatePath)) {
+      candidates.push(candidatePath);
+    }
+  }
+
+  return candidates;
 }

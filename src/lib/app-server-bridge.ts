@@ -137,8 +137,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
   private readonly codexDesktopGlobalStatePath: string;
-  private readonly persistedAtomRegistryPath: string;
-  private readonly workspaceRootRegistryPath: string;
+  private persistedAtomRegistryPath: string;
+  private workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
   private activeWorkspaceRoot: string | null;
   private desktopImportPromptSeen = false;
@@ -542,6 +542,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async restoreWorkspaceRootRegistry(): Promise<void> {
     try {
       const loaded = await loadWorkspaceRootRegistry(this.workspaceRootRegistryPath);
+      this.workspaceRootRegistryPath = loaded.path;
       if (loaded.state) {
         this.desktopImportPromptSeen = loaded.state.desktopImportPromptSeen;
         this.applyWorkspaceRootRegistry(loaded.state);
@@ -559,6 +560,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async restorePersistedAtomRegistry(): Promise<void> {
     try {
       const loaded = await loadPersistedAtomRegistry(this.persistedAtomRegistryPath);
+      this.persistedAtomRegistryPath = loaded.path;
       this.persistedAtoms.clear();
       for (const [key, value] of Object.entries(loaded.state)) {
         this.persistedAtoms.set(key, value);
