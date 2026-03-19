@@ -20,6 +20,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     mode?: string;
   };
 
+  type ConnectionPhase = "connected" | "degraded" | "reconnecting" | "reload-required";
+
   type DesktopImportMode = "first-run" | "manual";
 
   type DesktopImportProject = {
@@ -60,9 +62,13 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   const POCODEX_STYLESHEET_ID = "pocodex-stylesheet";
   const TOKEN_STORAGE_KEY = "__pocodex_token";
-  const RETRY_DELAYS_MS = [1000, 2000, 5000] as const;
+  const RETRY_DELAYS_MS = [1000, 2000, 5000, 8000, 12000] as const;
   const SESSION_CHECK_PATH = "/session-check";
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
+  const HEARTBEAT_STALE_AFTER_MS = 45_000;
+  const HEARTBEAT_MONITOR_INTERVAL_MS = 5_000;
+  const WAKE_GRACE_PERIOD_MS = 10_000;
+  const RELOAD_REQUIRED_FAILURE_COUNT = 6;
 
   const workerSubscribers = new Map<string, Set<WorkerMessageListener>>();
   const pendingMessages: string[] = [];
@@ -79,6 +85,11 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   let hasConnected = false;
   let hasAttemptedDesktopImportPrompt = false;
   let nextIpcRequestId = 0;
+  let connectionPhase: ConnectionPhase = "reconnecting";
+  let reconnectTimer: number | null = null;
+  let heartbeatMonitorTimer: number | null = null;
+  let lastServerHeartbeatAt = 0;
+  let wakeGraceDeadline = 0;
 
   toastHost.id = "pocodex-toast-host";
   statusHost.id = "pocodex-status-host";
@@ -205,6 +216,20 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     statusHost.hidden = true;
     delete statusHost.dataset.mode;
     statusHost.replaceChildren();
+  }
+
+  function setConnectionPhase(
+    phase: ConnectionPhase,
+    message?: string,
+    options: ConnectionStatusOptions = {},
+  ): void {
+    connectionPhase = phase;
+    if (!message) {
+      clearConnectionStatus();
+      return;
+    }
+
+    setConnectionStatus(message, options);
   }
 
   function installMobileSidebarThreadNavigationClose(): void {
@@ -903,13 +928,173 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
-  function scheduleReconnect(message: string): void {
-    const delay = RETRY_DELAYS_MS[Math.min(reconnectAttempt, RETRY_DELAYS_MS.length - 1)];
-    reconnectAttempt += 1;
-    setConnectionStatus(message);
-    window.setTimeout(() => {
+  function clearReconnectTimer(): void {
+    if (reconnectTimer === null) {
+      return;
+    }
+
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  function clearHeartbeatMonitor(): void {
+    if (heartbeatMonitorTimer === null) {
+      return;
+    }
+
+    window.clearTimeout(heartbeatMonitorTimer);
+    heartbeatMonitorTimer = null;
+  }
+
+  function isDocumentVisible(): boolean {
+    return document.visibilityState === "visible";
+  }
+
+  function hasDocumentFocus(): boolean {
+    return typeof document.hasFocus === "function" ? document.hasFocus() : true;
+  }
+
+  function isNetworkOnline(): boolean {
+    return typeof navigator === "undefined" || navigator.onLine !== false;
+  }
+
+  function isWakeGraceActive(): boolean {
+    return Date.now() < wakeGraceDeadline;
+  }
+
+  function enterWakeGracePeriod(): void {
+    wakeGraceDeadline = Date.now() + WAKE_GRACE_PERIOD_MS;
+  }
+
+  function startHeartbeatMonitor(): void {
+    clearHeartbeatMonitor();
+
+    const poll = () => {
+      heartbeatMonitorTimer = window.setTimeout(poll, HEARTBEAT_MONITOR_INTERVAL_MS);
+
+      if (
+        !socket ||
+        socket.readyState !== WebSocket.OPEN ||
+        !isDocumentVisible() ||
+        !isNetworkOnline() ||
+        isWakeGraceActive()
+      ) {
+        return;
+      }
+
+      if (Date.now() - lastServerHeartbeatAt <= HEARTBEAT_STALE_AFTER_MS) {
+        return;
+      }
+
+      if (connectionPhase === "connected") {
+        setConnectionPhase("degraded", "Pocodex connection looks stale. Reconnecting...", {
+          mode: "passive",
+        });
+      }
+
+      socket.close(4000, "heartbeat-timeout");
+    };
+
+    heartbeatMonitorTimer = window.setTimeout(poll, HEARTBEAT_MONITOR_INTERVAL_MS);
+  }
+
+  function scheduleReconnect(
+    message: string,
+    options: {
+      immediate?: boolean;
+      passive?: boolean;
+      suppressEscalation?: boolean;
+    } = {},
+  ): void {
+    clearReconnectTimer();
+
+    const shouldEscalate = !options.suppressEscalation && isDocumentVisible() && isNetworkOnline();
+    if (shouldEscalate) {
+      reconnectAttempt += 1;
+    }
+
+    const delay = options.immediate
+      ? 0
+      : RETRY_DELAYS_MS[Math.min(reconnectAttempt, RETRY_DELAYS_MS.length - 1)];
+    const nextPhase =
+      reconnectAttempt >= RELOAD_REQUIRED_FAILURE_COUNT && shouldEscalate
+        ? "reload-required"
+        : "reconnecting";
+    const nextMessage =
+      nextPhase === "reload-required"
+        ? "Pocodex is still reconnecting. Keep this page open, or refresh it if the connection does not recover."
+        : message;
+
+    setConnectionPhase(nextPhase, nextMessage, {
+      mode: options.passive || nextPhase !== "reload-required" ? "passive" : "blocking",
+    });
+
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
       void connectSocket();
-    }, delay);
+    }, applyReconnectJitter(delay));
+  }
+
+  function applyReconnectJitter(delay: number): number {
+    if (delay <= 0) {
+      return 0;
+    }
+
+    return Math.max(0, Math.round(delay * (0.85 + Math.random() * 0.3)));
+  }
+
+  function noteHealthyConnection(): void {
+    reconnectAttempt = 0;
+    lastServerHeartbeatAt = Date.now();
+    setConnectionPhase("connected");
+    clearReconnectTimer();
+    startHeartbeatMonitor();
+  }
+
+  function noteServerHeartbeat(sentAt: number): void {
+    lastServerHeartbeatAt = Date.now();
+    if (connectionPhase === "degraded") {
+      setConnectionPhase("connected");
+    }
+
+    sendEnvelope({
+      type: "heartbeat_ack",
+      sentAt,
+    });
+  }
+
+  function describeReconnectReason(closeEvent?: { code?: number; reason?: string }): string {
+    if (!isNetworkOnline()) {
+      return "Pocodex is offline. Waiting for network...";
+    }
+
+    if (!isDocumentVisible()) {
+      return "Pocodex is paused while this tab is in the background. Reconnecting when it wakes...";
+    }
+
+    if (closeEvent?.code === 4000 || closeEvent?.reason === "heartbeat-timeout") {
+      return "Pocodex connection timed out. Reconnecting...";
+    }
+
+    return "Pocodex lost the host connection. Retrying...";
+  }
+
+  function handleLifecycleReconnect(reason: string): void {
+    enterWakeGracePeriod();
+
+    if (!socket || socket.readyState === WebSocket.CLOSED) {
+      scheduleReconnect(reason, {
+        immediate: true,
+        passive: true,
+        suppressEscalation: !isDocumentVisible() || !isNetworkOnline(),
+      });
+      return;
+    }
+
+    if (socket.readyState === WebSocket.OPEN) {
+      lastServerHeartbeatAt = Date.now();
+      publishFocusState();
+    }
   }
 
   function flushPendingMessages(): void {
@@ -948,7 +1133,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   function publishFocusState(): void {
     sendEnvelope({
       type: "focus_state",
-      isFocused: document.visibilityState === "visible" && document.hasFocus(),
+      isFocused: isDocumentVisible() && hasDocumentFocus(),
     });
   }
 
@@ -962,48 +1147,54 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
     const token = getStoredToken();
     isConnecting = true;
-    setConnectionStatus(hasConnected ? "Reconnecting to Pocodex..." : "Connecting to Pocodex...");
+    clearReconnectTimer();
+    setConnectionPhase(
+      "reconnecting",
+      hasConnected ? "Reconnecting to Pocodex..." : "Connecting to Pocodex...",
+      { mode: "passive" },
+    );
 
     const validation = await validateSessionToken(token);
     if (!validation.ok) {
       isConnecting = false;
       if (validation.reason === "unauthorized") {
-        setConnectionStatus(
+        setConnectionPhase(
+          "reload-required",
           token
             ? "Pocodex rejected this token. Open the exact URL printed by the CLI for the current run."
             : "Pocodex requires a token. Open the exact URL printed by the CLI for the current run.",
         );
         return;
       }
-      scheduleReconnect("Pocodex is unavailable. Retrying...");
+      scheduleReconnect("Pocodex is unavailable. Retrying...", {
+        passive: true,
+        suppressEscalation: !isDocumentVisible() || !isNetworkOnline(),
+      });
       return;
     }
 
+    enterWakeGracePeriod();
     socket = new WebSocket(getSocketUrl(token));
     socket.addEventListener("open", () => {
       isConnecting = false;
-      reconnectAttempt = 0;
-      const shouldReload = hasConnected;
       hasConnected = true;
-      clearConnectionStatus();
+      noteHealthyConnection();
       flushPendingMessages();
       publishFocusState();
       for (const workerName of workerSubscribers.keys()) {
         sendEnvelope({ type: "worker_subscribe", workerName });
       }
-      if (!shouldReload) {
+      if (!hasAttemptedDesktopImportPrompt) {
         window.setTimeout(() => {
           void maybePromptForDesktopImport();
         }, 250);
-      }
-      if (shouldReload) {
-        window.location.reload();
       }
     });
 
     socket.addEventListener("error", () => {
       if (!hasConnected) {
-        setConnectionStatus(
+        setConnectionPhase(
+          "reload-required",
           "Pocodex could not open its live session. Check the CLI output and the page token.",
         );
       }
@@ -1037,10 +1228,18 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         case "css_reload":
           reloadStylesheet(envelope.href);
           break;
+        case "heartbeat":
+          noteServerHeartbeat(envelope.sentAt);
+          break;
         case "session_revoked":
           showNotice(envelope.reason || "This Pocodex session is no longer available.");
-          setConnectionStatus(envelope.reason || "This Pocodex session is no longer available.");
+          setConnectionPhase(
+            "reload-required",
+            envelope.reason || "This Pocodex session is no longer available.",
+          );
           isClosing = true;
+          clearReconnectTimer();
+          clearHeartbeatMonitor();
           socket?.close(4001, "revoked");
           break;
         case "error":
@@ -1049,15 +1248,22 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       }
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       const shouldReconnect = !isClosing;
       socket = null;
       isConnecting = false;
+      clearHeartbeatMonitor();
       if (!shouldReconnect) {
         return;
       }
-      showNotice("Pocodex lost the host connection. Retrying...");
-      scheduleReconnect("Pocodex lost the host connection. Retrying...");
+      const message = describeReconnectReason(event);
+      if (isDocumentVisible() && isNetworkOnline()) {
+        showNotice(message);
+      }
+      scheduleReconnect(message, {
+        passive: true,
+        suppressEscalation: !isDocumentVisible() || !isNetworkOnline() || isWakeGraceActive(),
+      });
     });
   }
 
@@ -1084,6 +1290,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         return typeof value.message === "string";
       case "css_reload":
         return typeof value.href === "string";
+      case "heartbeat":
+        return typeof value.sentAt === "number";
       case "session_revoked":
         return typeof value.reason === "string";
       case "error":
@@ -1125,7 +1333,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       if (isRecord(message) && message.type === "electron-window-focus-request") {
         dispatchHostMessage({
           type: "electron-window-focus-changed",
-          isFocused: document.visibilityState === "visible" && document.hasFocus(),
+          isFocused: isDocumentVisible() && hasDocumentFocus(),
         });
         return;
       }
@@ -1187,13 +1395,34 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     writable: false,
   });
 
-  window.addEventListener("focus", publishFocusState);
+  window.addEventListener("focus", () => {
+    publishFocusState();
+    handleLifecycleReconnect("Pocodex is reconnecting after the page became active.");
+  });
   window.addEventListener("blur", publishFocusState);
-  document.addEventListener("visibilitychange", publishFocusState);
+  window.addEventListener("pageshow", () => {
+    handleLifecycleReconnect("Pocodex is reconnecting after the page resumed.");
+  });
+  window.addEventListener("online", () => {
+    handleLifecycleReconnect("Pocodex is back online. Reconnecting...");
+  });
+  window.addEventListener("offline", () => {
+    setConnectionPhase("degraded", "Pocodex is offline. Waiting for network...", {
+      mode: "passive",
+    });
+  });
+  document.addEventListener("visibilitychange", () => {
+    publishFocusState();
+    if (isDocumentVisible()) {
+      handleLifecycleReconnect("Pocodex is reconnecting after the page became visible.");
+    }
+  });
   window.addEventListener(
     "beforeunload",
     () => {
       isClosing = true;
+      clearReconnectTimer();
+      clearHeartbeatMonitor();
       if (socket) {
         socket.close(1000, "unload");
       }

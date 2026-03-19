@@ -248,6 +248,40 @@ describe("PocodexServer", () => {
     second.close();
   });
 
+  it("emits heartbeat envelopes to connected browser sessions", async () => {
+    const { server, url } = await createTestServer("secret", {
+      heartbeatIntervalMs: 20,
+      heartbeatTimeoutMs: 200,
+    });
+    servers.push(server);
+
+    const socket = await connect(url, "secret");
+
+    await expect(nextMessage(socket)).resolves.toEqual({
+      type: "heartbeat",
+      sentAt: expect.any(Number),
+    });
+
+    socket.close();
+  });
+
+  it("closes stale websocket sessions after missed heartbeat acknowledgements", async () => {
+    const { server, url } = await createTestServer("secret", {
+      heartbeatIntervalMs: 20,
+      heartbeatTimeoutMs: 60,
+    });
+    servers.push(server);
+
+    const socket = await connect(url, "secret");
+
+    await expect(
+      new Promise<number>((resolve, reject) => {
+        socket.once("close", (code) => resolve(code));
+        socket.once("error", reject);
+      }),
+    ).resolves.toBe(4000);
+  });
+
   it("refcounts worker subscriptions across browser sessions", async () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);
@@ -525,7 +559,13 @@ async function createTestServer(): Promise<{
   server: PocodexServer;
   url: string;
 }>;
-async function createTestServer(token = "secret"): Promise<{
+async function createTestServer(
+  token = "secret",
+  options: {
+    heartbeatIntervalMs?: number;
+    heartbeatTimeoutMs?: number;
+  } = {},
+): Promise<{
   relay: StubRelay;
   server: PocodexServer;
   url: string;
@@ -542,6 +582,8 @@ async function createTestServer(token = "secret"): Promise<{
     webviewRoot,
     readPocodexStylesheet: async () => "#pocodex-toast-host [data-pocodex-toast] { color: red; }",
     renderIndexHtml: async () => "<!doctype html><html><body></body></html>",
+    heartbeatIntervalMs: options.heartbeatIntervalMs,
+    heartbeatTimeoutMs: options.heartbeatTimeoutMs,
   });
 
   await server.listen();

@@ -29,6 +29,7 @@ interface BrowserSession {
   subscribedWorkers: Set<string>;
   isFocused: boolean;
   terminalSessionIdsByLocalSessionId: Map<string, string>;
+  lastHeartbeatAckAt: number;
 }
 
 interface TerminalSessionRoute {
@@ -49,6 +50,8 @@ const TERMINAL_ATTACH_MESSAGE_TYPES = new Set(["terminal-create", "terminal-atta
 const TERMINAL_STREAM_MESSAGE_TYPES = new Set(["terminal-data", "terminal-error", "terminal-exit"]);
 const TERMINAL_TARGET_BROWSER_SESSION_ID_KEY = "_pocodexBrowserSessionId";
 const TERMINAL_TARGET_BROWSER_TERMINAL_SESSION_ID_KEY = "_pocodexBrowserTerminalSessionId";
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45_000;
 
 export class PocodexServer {
   private readonly httpServer: HttpServer;
@@ -58,9 +61,17 @@ export class PocodexServer {
   private readonly workerSubscriberCounts = new Map<string, number>();
   private readonly terminalSessionRoutes = new Map<string, TerminalSessionRoute>();
   private readonly terminalSessionIdsByConversation = new Map<string, string>();
+  private readonly heartbeatIntervalMs: number;
+  private readonly heartbeatTimeoutMs: number;
+  private readonly heartbeatTimer: NodeJS.Timeout;
   private indexHtmlPromise?: Promise<string>;
 
   constructor(private readonly options: PocodexServerOptions) {
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    this.heartbeatTimeoutMs = Math.max(
+      options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
+      this.heartbeatIntervalMs + 1,
+    );
     this.httpServer = createServer((request, response) => {
       void this.handleHttpRequest(request, response);
     });
@@ -85,6 +96,11 @@ export class PocodexServer {
         message: error.message,
       });
     });
+
+    this.heartbeatTimer = setInterval(() => {
+      this.handleHeartbeatTick();
+    }, this.heartbeatIntervalMs);
+    this.heartbeatTimer.unref();
   }
 
   async listen(): Promise<void> {
@@ -98,6 +114,7 @@ export class PocodexServer {
   }
 
   async close(): Promise<void> {
+    clearInterval(this.heartbeatTimer);
     for (const session of this.sessions.values()) {
       session.socket.close(1000, "shutdown");
     }
@@ -245,6 +262,7 @@ export class PocodexServer {
       subscribedWorkers: new Set(),
       isFocused: true,
       terminalSessionIdsByLocalSessionId: new Map(),
+      lastHeartbeatAckAt: Date.now(),
     };
     this.sessions.set(session.id, session);
     debugLog("server", "browser connected", { sessionId: session.id });
@@ -277,6 +295,7 @@ export class PocodexServer {
 
   private async handleSocketMessage(session: BrowserSession, raw: string): Promise<void> {
     const envelope = JSON.parse(raw) as BrowserToServerEnvelope;
+    session.lastHeartbeatAckAt = Date.now();
     debugLog("server", "browser message", envelope);
 
     if (this.sessions.get(session.id) !== session) {
@@ -315,6 +334,8 @@ export class PocodexServer {
             isFocused: envelope.isFocused,
           },
         });
+        break;
+      case "heartbeat_ack":
         break;
       default:
         this.send(session.socket, {
@@ -752,6 +773,25 @@ export class PocodexServer {
   private broadcast(envelope: ServerToBrowserEnvelope): void {
     for (const session of this.sessions.values()) {
       this.send(session.socket, envelope);
+    }
+  }
+
+  private handleHeartbeatTick(): void {
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      if (now - session.lastHeartbeatAckAt > this.heartbeatTimeoutMs) {
+        debugLog("server", "closing stale browser session", {
+          sessionId: session.id,
+          idleMs: now - session.lastHeartbeatAckAt,
+        });
+        session.socket.close(4000, "heartbeat-timeout");
+        continue;
+      }
+
+      this.send(session.socket, {
+        type: "heartbeat",
+        sentAt: now,
+      });
     }
   }
 
