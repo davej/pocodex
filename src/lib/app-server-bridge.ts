@@ -979,6 +979,14 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         const body = parseJsonBody(message.body);
         const handled = await this.handleCodexFetchRequest(message.url, body);
         if (handled) {
+          if (message.url === "vscode://codex/ide-context") {
+            this.emitFetchError(
+              message.requestId,
+              handled.status,
+              "IDE context is unavailable in Pocodex.",
+            );
+            return;
+          }
           this.emitFetchSuccess(message.requestId, handled.body, handled.status);
           return;
         }
@@ -1399,9 +1407,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         };
       case "ide-context":
         return {
-          status: 200,
+          status: 503,
           body: {
-            ideContext: null,
+            error: "IDE context is unavailable in Pocodex.",
           },
         };
       case "paths-exist":

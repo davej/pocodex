@@ -1141,7 +1141,14 @@ describe("AppServerBridge", () => {
       }),
     });
 
-    await waitForCondition(() => emittedMessages.length >= 4);
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ide-context",
+      method: "POST",
+      url: "vscode://codex/ide-context",
+    });
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-ide-context")));
 
     expect(getFetchJsonBody(emittedMessages, "fetch-os")).toMatchObject({
       platform: expect.any(String),
@@ -1165,6 +1172,14 @@ describe("AppServerBridge", () => {
 
     expect(getFetchJsonBody(emittedMessages, "fetch-paths")).toEqual({
       existingPaths: [TEST_WORKSPACE_ROOT],
+    });
+
+    expect(getFetchResponse(emittedMessages, "fetch-ide-context")).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-ide-context",
+      responseType: "error",
+      status: 503,
+      error: "IDE context is unavailable in Pocodex.",
     });
 
     await bridge.close();
