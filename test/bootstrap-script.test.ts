@@ -50,6 +50,8 @@ class TestElement extends TestEventTargetLike {
   href = "";
   textContent = "";
   style: Record<string, string> = {};
+  private rectLeft = 0;
+  private rectWidth = 0;
   private readonly attributes = new Map<string, string>();
 
   constructor(readonly tagName: string) {
@@ -150,6 +152,29 @@ class TestElement extends TestEventTargetLike {
       return this.rel || null;
     }
     return this.attributes.get(name) ?? null;
+  }
+
+  setBoundingClientRect(rect: { left?: number; width?: number }): void {
+    if (typeof rect.left === "number") {
+      this.rectLeft = rect.left;
+    }
+    if (typeof rect.width === "number") {
+      this.rectWidth = rect.width;
+    }
+  }
+
+  getBoundingClientRect() {
+    return {
+      left: this.rectLeft,
+      top: 0,
+      right: this.rectLeft + this.rectWidth,
+      bottom: 0,
+      width: this.rectWidth,
+      height: 0,
+      x: this.rectLeft,
+      y: 0,
+      toJSON: () => null,
+    };
   }
 
   querySelector(selector: string): TestElement | null {
@@ -430,6 +455,36 @@ async function flushBootstrapMicrotasks(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+function matchesPersistedAtomUpdate(envelope: unknown, key: string): boolean {
+  return (
+    typeof envelope === "object" &&
+    envelope !== null &&
+    "type" in envelope &&
+    envelope.type === "bridge_message" &&
+    "message" in envelope &&
+    typeof envelope.message === "object" &&
+    envelope.message !== null &&
+    "type" in envelope.message &&
+    envelope.message.type === "persisted-atom-update" &&
+    "key" in envelope.message &&
+    envelope.message.key === key
+  );
+}
+
+function setMobileSidebarOpenState(contentPane: TestElement, navigation?: TestElement): void {
+  contentPane.style.width = "calc(100% - var(--spacing-token-sidebar))";
+  contentPane.style.transform = "translateX(var(--spacing-token-sidebar))";
+  contentPane.setBoundingClientRect({ left: 240, width: 150 });
+  navigation?.setBoundingClientRect({ left: 0, width: 240 });
+}
+
+function setMobileSidebarClosedState(contentPane: TestElement, navigation?: TestElement): void {
+  contentPane.style.width = "100%";
+  contentPane.style.transform = "translateX(0)";
+  contentPane.setBoundingClientRect({ left: 0, width: 390 });
+  navigation?.setBoundingClientRect({ left: -240, width: 240 });
+}
+
 function createBootstrapHarness(
   options: {
     href?: string;
@@ -581,6 +636,21 @@ function createBootstrapHarness(
       socket.emit("message", {
         data: JSON.stringify(envelope),
       });
+    },
+    openSocket(): void {
+      const socket = TestWebSocket.latest;
+      if (!socket) {
+        throw new Error("No websocket connection was created.");
+      }
+      socket.readyState = TestWebSocket.OPEN;
+      socket.emit("open", {});
+    },
+    getSentEnvelopes(): unknown[] {
+      const socket = TestWebSocket.latest;
+      if (!socket) {
+        return [];
+      }
+      return socket.sentMessages.map((message) => JSON.parse(message) as unknown);
     },
   };
 }
@@ -1756,6 +1826,462 @@ describe("renderBootstrapScript", () => {
       value: "newline",
       deleted: false,
     });
+  });
+
+  it("restores the desktop sidebar mode from host persisted atoms and persists later changes", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness();
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    contentPane.setBoundingClientRect({ left: 300, width: 980 });
+    const toggleButton = harness.document.createElement("button");
+    toggleButton.setAttribute("aria-label", "Show sidebar");
+    harness.document.body.appendChild(contentPane);
+    harness.document.body.appendChild(toggleButton);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {
+          "pocodex-sidebar-mode": "collapsed",
+        },
+      },
+    });
+
+    drainTestTimers(harness.timers, 1);
+
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    contentPane.setBoundingClientRect({ left: 0, width: 1280 });
+    drainTestTimers(harness.timers);
+
+    const persistedUpdatesBeforeToggle = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdatesBeforeToggle).toHaveLength(0);
+
+    contentPane.setBoundingClientRect({ left: 300, width: 980 });
+    harness.document.dispatchEvent(new TestMouseEvent("click", { target: toggleButton }));
+    drainTestTimers(harness.timers);
+
+    const persistedUpdates = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdates).toContainEqual({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-update",
+        key: "pocodex-sidebar-mode",
+        value: "expanded",
+      },
+    });
+  });
+
+  it("keeps the desktop sidebar expanded when no host mode has been stored", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness();
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    contentPane.setBoundingClientRect({ left: 300, width: 980 });
+    harness.document.body.appendChild(contentPane);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {},
+      },
+    });
+
+    drainTestTimers(harness.timers);
+
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+  });
+
+  it("reapplies the stored desktop sidebar mode when the shell resets after restore", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness();
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface left-token-sidebar");
+    contentPane.setBoundingClientRect({ left: 300, width: 980 });
+    harness.document.body.appendChild(contentPane);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {
+          "pocodex-sidebar-mode": "collapsed",
+        },
+      },
+    });
+
+    drainTestTimers(harness.timers, 1);
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    contentPane.setAttribute("class", "main-surface left-0");
+    contentPane.setBoundingClientRect({ left: 0, width: 1280 });
+    harness.windowObject.dispatchEvent({ type: "resize" });
+    drainTestTimers(harness.timers);
+
+    contentPane.setAttribute("class", "main-surface left-token-sidebar");
+    contentPane.setBoundingClientRect({ left: 300, width: 980 });
+    harness.windowObject.dispatchEvent({ type: "resize" });
+    for (let index = 0; index < 5; index += 1) {
+      const toggleMessages = harness.dispatchedMessages.filter(
+        (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+      );
+      if (toggleMessages.length >= 2) {
+        break;
+      }
+      drainTestTimers(harness.timers, 1);
+    }
+
+    const toggleMessages = harness.dispatchedMessages.filter(
+      (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+    );
+    expect(toggleMessages).toHaveLength(2);
+
+    const persistedUpdates = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdates).toHaveLength(0);
+  });
+
+  it("restores the mobile sidebar mode from host persisted atoms and persists later changes", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({ mobile: true });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    const toggleButton = harness.document.createElement("button");
+    toggleButton.setAttribute("aria-label", "Show sidebar");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    harness.document.body.appendChild(toggleButton);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {
+          "pocodex-sidebar-mode": "collapsed",
+        },
+      },
+    });
+
+    drainTestTimers(harness.timers, 1);
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    contentPane.style.width = "100%";
+    contentPane.style.transform = "translateX(0)";
+    contentPane.setBoundingClientRect({ left: 0, width: 390 });
+    navigation.setBoundingClientRect({ left: 0, width: 240 });
+    drainTestTimers(harness.timers);
+
+    const persistedUpdatesBeforeToggle = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdatesBeforeToggle).toHaveLength(0);
+
+    setMobileSidebarOpenState(contentPane, navigation);
+    harness.document.dispatchEvent(new TestMouseEvent("click", { target: toggleButton }));
+    drainTestTimers(harness.timers);
+
+    const persistedUpdates = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdates).toContainEqual({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-update",
+        key: "pocodex-sidebar-mode",
+        value: "expanded",
+      },
+    });
+  });
+
+  it("defaults the mobile sidebar to expanded when no host mode has been stored", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({ mobile: true });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarClosedState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {},
+      },
+    });
+
+    drainTestTimers(harness.timers, 1);
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+  });
+
+  it("persists mobile sidebar closes triggered from the content pane", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({ mobile: true });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    const contentChild = harness.document.createElement("div");
+    contentPane.appendChild(contentChild);
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {
+          "pocodex-sidebar-mode": "expanded",
+        },
+      },
+    });
+
+    drainTestTimers(harness.timers);
+    harness.dispatchedMessages.length = 0;
+
+    harness.document.dispatchEvent(new TestMouseEvent("click", { target: contentChild }));
+    for (let index = 0; index < 5; index += 1) {
+      if (
+        harness.dispatchedMessages.some(
+          (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+        )
+      ) {
+        break;
+      }
+      drainTestTimers(harness.timers, 1);
+    }
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    setMobileSidebarClosedState(contentPane, navigation);
+    drainTestTimers(harness.timers);
+
+    const toggleMessages = harness.dispatchedMessages.filter(
+      (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+    );
+    expect(toggleMessages).toHaveLength(1);
+
+    const persistedUpdates = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdates).toContainEqual({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-update",
+        key: "pocodex-sidebar-mode",
+        value: "collapsed",
+      },
+    });
+  });
+
+  it("reapplies the stored mobile sidebar mode when the shell resets after restore", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({ mobile: true });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {
+          "pocodex-sidebar-mode": "collapsed",
+        },
+      },
+    });
+
+    drainTestTimers(harness.timers, 1);
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+
+    setMobileSidebarClosedState(contentPane, navigation);
+    harness.windowObject.dispatchEvent({ type: "resize" });
+    drainTestTimers(harness.timers);
+
+    setMobileSidebarOpenState(contentPane, navigation);
+    harness.windowObject.dispatchEvent({ type: "resize" });
+    for (let index = 0; index < 5; index += 1) {
+      const toggleMessages = harness.dispatchedMessages.filter(
+        (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+      );
+      if (toggleMessages.length >= 2) {
+        break;
+      }
+      drainTestTimers(harness.timers, 1);
+    }
+
+    const toggleMessages = harness.dispatchedMessages.filter(
+      (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+    );
+    expect(toggleMessages).toHaveLength(2);
+
+    const persistedUpdates = harness
+      .getSentEnvelopes()
+      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
+    expect(persistedUpdates).toHaveLength(0);
+  });
+
+  it("does not re-toggle the mobile sidebar while a restore transition is still settling", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({ mobile: true });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {
+          "pocodex-sidebar-mode": "collapsed",
+        },
+      },
+    });
+
+    drainTestTimers(harness.timers, 1);
+
+    let toggleMessages = harness.dispatchedMessages.filter(
+      (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+    );
+    expect(toggleMessages).toHaveLength(1);
+
+    drainTestTimers(harness.timers, 3);
+    toggleMessages = harness.dispatchedMessages.filter(
+      (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+    );
+    expect(toggleMessages).toHaveLength(1);
+
+    setMobileSidebarClosedState(contentPane, navigation);
+    drainTestTimers(harness.timers, 3);
+    toggleMessages = harness.dispatchedMessages.filter(
+      (message) => JSON.stringify(message) === JSON.stringify({ type: "toggle-sidebar" }),
+    );
+    expect(toggleMessages).toHaveLength(1);
   });
 
   it("stores the active local thread in the thread query param", async () => {
