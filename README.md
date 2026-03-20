@@ -105,7 +105,7 @@ An optional token can gate the browser session. Pocodex supports multiple concur
 - Native desktop behaviors such as notifications, badge updates, context menus, power-save controls, and window mode controls are blocked or stubbed
 - Generic IPC coverage is incomplete; unsupported IPC methods return an error response
 - Streaming fetch is not implemented
-- Some host fetch endpoints are stubbed with empty or placeholder data
+- Personal ChatGPT cloud fetches under `/wham/*` are proxied through managed local auth, but some workspace, billing, and subscription endpoints still return stubs or placeholder data
 - This relies on internal Codex bundle structure and host protocols, so Codex app updates may break assumptions
 - Security is intentionally light; this is suitable for local use and trusted LANs, not public exposure
 

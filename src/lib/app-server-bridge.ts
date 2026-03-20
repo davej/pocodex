@@ -77,6 +77,25 @@ interface AppServerFetchCancel {
   requestId: string;
 }
 
+interface RelativeFetchRequestContext {
+  rawUrl: string;
+  method: string;
+  headers?: unknown;
+  body?: unknown;
+  signal: AbortSignal;
+}
+
+interface RelativeFetchResponse {
+  status: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}
+
+interface ManagedCodexAuth {
+  accessToken: string;
+  accountId: string;
+}
+
 interface AppServerMcpRequestEnvelope {
   type: "mcp-request";
   request?: JsonRpcRequest;
@@ -999,12 +1018,15 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       }
 
       if (message.url.startsWith("/")) {
-        const handled = await this.handleRelativeFetchRequest(
-          message.url,
-          typeof message.method === "string" ? message.method : "GET",
-        );
+        const handled = await this.handleRelativeFetchRequest({
+          rawUrl: message.url,
+          method: typeof message.method === "string" ? message.method : "GET",
+          headers: message.headers,
+          body: message.body,
+          signal: controller.signal,
+        });
         if (handled) {
-          this.emitFetchSuccess(message.requestId, handled.body, handled.status);
+          this.emitFetchSuccess(message.requestId, handled.body, handled.status, handled.headers);
           return;
         }
 
@@ -1014,19 +1036,15 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           body: normalizeRequestBody(message.body),
           signal: controller.signal,
         });
-        const bodyText = await response.text();
-        const headers: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          headers[key] = value;
-        });
+        const handledResponse = await readRemoteFetchResponse(response);
 
         this.emit("bridge_message", {
           type: "fetch-response",
           requestId: message.requestId,
           responseType: "success",
-          status: response.status,
-          headers,
-          bodyJsonString: JSON.stringify(parseResponseBody(bodyText)),
+          status: handledResponse.status,
+          headers: handledResponse.headers,
+          bodyJsonString: JSON.stringify(handledResponse.body),
         });
         return;
       }
@@ -1037,19 +1055,15 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         body: normalizeRequestBody(message.body),
         signal: controller.signal,
       });
-      const bodyText = await response.text();
-      const headers: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
+      const handledResponse = await readRemoteFetchResponse(response);
 
       this.emit("bridge_message", {
         type: "fetch-response",
         requestId: message.requestId,
         responseType: "success",
-        status: response.status,
-        headers,
-        bodyJsonString: JSON.stringify(parseResponseBody(bodyText)),
+        status: handledResponse.status,
+        headers: handledResponse.headers,
+        bodyJsonString: JSON.stringify(handledResponse.body),
       });
     } catch (error) {
       const normalized = normalizeError(error);
@@ -1454,45 +1468,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleRelativeFetchRequest(
-    rawUrl: string,
-    method: string,
-  ): Promise<{ status: number; body: unknown } | null> {
-    const pathname = new URL(rawUrl, "https://chatgpt.com").pathname;
-    const normalizedMethod = method.toUpperCase();
+    request: RelativeFetchRequestContext,
+  ): Promise<RelativeFetchResponse | null> {
+    const pathname = new URL(request.rawUrl, "https://chatgpt.com").pathname;
+    const normalizedMethod = request.method.toUpperCase();
 
-    if (pathname === "/wham/accounts/check" && normalizedMethod === "GET") {
-      return {
-        status: 200,
-        body: {
-          accounts: [],
-          account_ordering: [],
-        },
-      };
-    }
-
-    if (pathname === "/wham/environments" && normalizedMethod === "GET") {
-      return {
-        status: 200,
-        body: [],
-      };
-    }
-
-    if (pathname === "/wham/usage" && normalizedMethod === "GET") {
-      return {
-        status: 200,
-        body: await this.readWhamUsage(),
-      };
-    }
-
-    if (pathname === "/wham/tasks/list" && normalizedMethod === "GET") {
-      return {
-        status: 200,
-        body: {
-          items: [],
-          tasks: [],
-          nextCursor: null,
-        },
-      };
+    if (pathname.startsWith("/wham/")) {
+      return this.handleWhamFetchRequest(request, pathname, normalizedMethod);
     }
 
     if (pathname === "/subscriptions/auto_top_up/settings" && normalizedMethod === "GET") {
@@ -1546,6 +1528,101 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     return null;
   }
 
+  private async handleWhamFetchRequest(
+    request: RelativeFetchRequestContext,
+    pathname: string,
+    normalizedMethod: string,
+  ): Promise<RelativeFetchResponse> {
+    const auth = await this.readManagedCodexAuth();
+    if (!auth) {
+      return this.buildWhamFallbackResponse(pathname, normalizedMethod);
+    }
+
+    let response = await this.proxyWhamFetchRequest(request, auth);
+    if (response.status !== 401 && response.status !== 403) {
+      return response;
+    }
+
+    await this.sendLocalRequestSafely("account/read", {
+      refreshToken: true,
+    });
+    const refreshedAuth = await this.readManagedCodexAuth();
+    if (!refreshedAuth) {
+      return response;
+    }
+
+    response = await this.proxyWhamFetchRequest(request, refreshedAuth);
+    return response;
+  }
+
+  private async proxyWhamFetchRequest(
+    request: RelativeFetchRequestContext,
+    auth: ManagedCodexAuth,
+  ): Promise<RelativeFetchResponse> {
+    const sourceUrl = new URL(request.rawUrl, "https://chatgpt.com");
+    const targetUrl = new URL(`/backend-api${sourceUrl.pathname}${sourceUrl.search}`, sourceUrl);
+    const headers = new Headers(normalizeHeaders(request.headers));
+    headers.set("Authorization", `Bearer ${auth.accessToken}`);
+    headers.set("chatgpt-account-id", auth.accountId);
+    headers.set("originator", "codex_cli_rs");
+
+    const response = await fetch(targetUrl, {
+      method: request.method,
+      headers,
+      body: normalizeRequestBody(request.body),
+      signal: request.signal,
+    });
+
+    return readRemoteFetchResponse(response);
+  }
+
+  private async buildWhamFallbackResponse(
+    pathname: string,
+    normalizedMethod: string,
+  ): Promise<RelativeFetchResponse> {
+    if (pathname === "/wham/accounts/check" && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          accounts: [],
+          account_ordering: [],
+        },
+      };
+    }
+
+    if (pathname === "/wham/environments" && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: [],
+      };
+    }
+
+    if (pathname === "/wham/usage" && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: await this.readWhamUsage(),
+      };
+    }
+
+    if (pathname === "/wham/tasks/list" && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          items: [],
+          tasks: [],
+          nextCursor: null,
+        },
+      };
+    }
+
+    return {
+      status: 401,
+      body: {
+        error: "Managed Codex auth is required for cloud requests.",
+      },
+    };
+  }
+
   private async readAccountInfo(): Promise<{ plan: UsageVisibilityPlan | null }> {
     const result = await this.sendLocalRequestSafely("account/read", {
       refreshToken: false,
@@ -1558,6 +1635,38 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async readWhamUsage(): Promise<WhamUsagePayload> {
     const result = await this.sendLocalRequestSafely("account/rateLimits/read");
     return buildWhamUsagePayload(result);
+  }
+
+  private async readManagedCodexAuth(): Promise<ManagedCodexAuth | null> {
+    const authPath = join(deriveCodexHomePath(), "auth.json");
+
+    try {
+      const contents = await readFile(authPath, "utf8");
+      const parsed = JSON.parse(contents);
+      const tokens = isJsonRecord(parsed) && isJsonRecord(parsed.tokens) ? parsed.tokens : null;
+      const accessToken =
+        typeof tokens?.access_token === "string" ? tokens.access_token.trim() : "";
+      const accountId = typeof tokens?.account_id === "string" ? tokens.account_id.trim() : "";
+
+      if (!accessToken || !accountId) {
+        return null;
+      }
+
+      return {
+        accessToken,
+        accountId,
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return null;
+      }
+
+      debugLog("app-server", "failed to read managed auth for wham proxy", {
+        error: normalizeError(error).message,
+        path: authPath,
+      });
+      return null;
+    }
   }
 
   private readGlobalState(body: unknown): Record<string, unknown> {
@@ -1927,15 +2036,23 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     };
   }
 
-  private emitFetchSuccess(requestId: string, body: unknown, status = 200): void {
+  private emitFetchSuccess(
+    requestId: string,
+    body: unknown,
+    status = 200,
+    headers?: Record<string, string>,
+  ): void {
     this.emit("bridge_message", {
       type: "fetch-response",
       requestId,
       responseType: "success",
       status,
-      headers: {
-        "content-type": "application/json",
-      },
+      headers:
+        headers && Object.keys(headers).length > 0
+          ? headers
+          : {
+              "content-type": "application/json",
+            },
       bodyJsonString: JSON.stringify(body),
     });
   }
@@ -2379,6 +2496,23 @@ function parseResponseBody(bodyText: string): unknown {
   } catch {
     return bodyText;
   }
+}
+
+async function readRemoteFetchResponse(response: Response): Promise<RelativeFetchResponse> {
+  const bodyText = await response.text();
+  return {
+    status: response.status,
+    headers: readResponseHeaders(response.headers),
+    body: parseResponseBody(bodyText),
+  };
+}
+
+function readResponseHeaders(headers: Headers): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    normalized[key] = value;
+  });
+  return normalized;
 }
 
 function normalizeHeaders(headers: unknown): Record<string, string> | undefined {

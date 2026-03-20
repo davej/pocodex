@@ -21,6 +21,7 @@ vi.mock("node-pty", () => ({
 let mockLocalThreadListData: unknown[] = [];
 const mockLocalRequestResults = new Map<string, unknown>();
 const mockLocalRequestErrors = new Map<string, string>();
+const mockLocalRequests: Array<{ method: string; params: unknown }> = [];
 const tempDirs: string[] = [];
 const mockPtys: MockPty[] = [];
 const originalCodexHome = process.env.CODEX_HOME;
@@ -91,6 +92,10 @@ class MockChildProcess extends EventEmitter {
         if (!localRequest) {
           continue;
         }
+        mockLocalRequests.push({
+          method: localRequest.method,
+          params: "params" in message ? message.params : undefined,
+        });
 
         setImmediate(() => {
           const errorMessage = mockLocalRequestErrors.get(localRequest.method);
@@ -212,6 +217,7 @@ describe("AppServerBridge", () => {
     mockLocalThreadListData = [];
     mockLocalRequestResults.clear();
     mockLocalRequestErrors.clear();
+    mockLocalRequests.length = 0;
     mockPtys.length = 0;
     if (originalCodexHome === undefined) {
       delete process.env.CODEX_HOME;
@@ -1416,66 +1422,66 @@ describe("AppServerBridge", () => {
     }
   });
 
-  it("stubs wham endpoints locally instead of proxying to chatgpt.com", async () => {
-    mockLocalRequestResults.set("account/rateLimits/read", {
-      rateLimits: {
-        limitId: "codex",
-        limitName: null,
-        primary: {
-          usedPercent: 25,
-          windowDurationMins: 300,
-          resetsAt: 1_773_987_355,
-        },
-        secondary: {
-          usedPercent: 100,
-          windowDurationMins: 10_080,
-          resetsAt: 1_774_067_036,
-        },
-        credits: {
-          hasCredits: true,
-          unlimited: false,
-          balance: "650.5200000000",
-        },
-        planType: "plus",
-      },
-      rateLimitsByLimitId: {
-        codex: {
-          limitId: "codex",
-          limitName: null,
-          primary: {
-            usedPercent: 25,
-            windowDurationMins: 300,
-            resetsAt: 1_773_987_355,
-          },
-          secondary: {
-            usedPercent: 100,
-            windowDurationMins: 10_080,
-            resetsAt: 1_774_067_036,
-          },
-          credits: {
-            hasCredits: true,
-            unlimited: false,
-            balance: "650.5200000000",
-          },
-          planType: "plus",
-        },
-        "gpt-5.3-codex-spark": {
-          limitId: "gpt-5.3-codex-spark",
-          limitName: "gpt-5.3-codex-spark",
-          primary: {
-            usedPercent: 75,
-            windowDurationMins: 300,
-            resetsAt: 1_773_987_500,
-          },
-          secondary: {
-            usedPercent: 50,
-            windowDurationMins: 10_080,
-            resetsAt: 1_774_067_200,
-          },
+  it("proxies wham endpoints through backend-api with managed auth", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    await writeCodexAuthFile(codexHome, {
+      accessToken: "test-access-token",
+      accountId: "acct_personal",
+    });
+
+    const proxiedRequests: Array<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string | null;
+    }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = {
+        url: String(input),
+        method: init?.method ?? "GET",
+        headers: normalizeFetchRequestHeaders(init?.headers),
+        body: normalizeFetchRequestBody(init?.body),
+      };
+      proxiedRequests.push(request);
+
+      if (request.url === "https://chatgpt.com/backend-api/wham/environments") {
+        return createJsonResponse([{ id: "env_1", name: "Default" }]);
+      }
+      if (
+        request.url ===
+        "https://chatgpt.com/backend-api/wham/tasks/list?limit=20&task_filter=current"
+      ) {
+        return createJsonResponse({
+          items: [{ id: "task_1", status: "running" }],
+          cursor: "cursor_1",
+        });
+      }
+      if (request.url === "https://chatgpt.com/backend-api/wham/accounts/check") {
+        return createJsonResponse({
+          accounts: [{ id: "acct_personal", status: "active" }],
+          account_ordering: ["acct_personal"],
+          default_account_id: "acct_personal",
+        });
+      }
+      if (request.url === "https://chatgpt.com/backend-api/wham/usage") {
+        return createJsonResponse({
+          plan_type: "plus",
           credits: null,
-          planType: "plus",
-        },
-      },
+        });
+      }
+      if (request.url === "https://chatgpt.com/backend-api/wham/tasks") {
+        return createJsonResponse(
+          {
+            id: "task_new",
+            status: "queued",
+          },
+          201,
+        );
+      }
+
+      throw new Error(`Unexpected proxied fetch: ${request.url}`);
     });
 
     const bridge = await createBridge(children);
@@ -1484,98 +1490,276 @@ describe("AppServerBridge", () => {
       emittedMessages.push(message);
     });
 
-    await bridge.forwardBridgeMessage({
-      type: "fetch",
-      requestId: "fetch-wham-environments",
-      method: "GET",
-      url: "/wham/environments",
-    });
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-environments",
+        method: "GET",
+        url: "/wham/environments",
+      });
 
-    await bridge.forwardBridgeMessage({
-      type: "fetch",
-      requestId: "fetch-wham-tasks",
-      method: "GET",
-      url: "/wham/tasks/list?limit=20&task_filter=current",
-    });
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-tasks",
+        method: "GET",
+        url: "/wham/tasks/list?limit=20&task_filter=current",
+      });
 
-    await waitForCondition(() => emittedMessages.length >= 2);
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-accounts",
+        method: "GET",
+        url: "/wham/accounts/check",
+      });
 
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([]);
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage",
+        method: "GET",
+        url: "/wham/usage",
+      });
 
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-tasks")).toEqual({
-      items: [],
-      tasks: [],
-      nextCursor: null,
-    });
-
-    await bridge.forwardBridgeMessage({
-      type: "fetch",
-      requestId: "fetch-wham-accounts",
-      method: "GET",
-      url: "/wham/accounts/check",
-    });
-
-    await bridge.forwardBridgeMessage({
-      type: "fetch",
-      requestId: "fetch-wham-usage",
-      method: "GET",
-      url: "/wham/usage",
-    });
-
-    await waitForCondition(() => emittedMessages.length >= 4);
-
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-accounts")).toEqual({
-      accounts: [],
-      account_ordering: [],
-    });
-
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
-      credits: {
-        has_credits: true,
-        unlimited: false,
-        balance: "650.5200000000",
-      },
-      plan_type: "plus",
-      rate_limit_name: null,
-      rate_limit: {
-        primary_window: {
-          used_percent: 25,
-          limit_window_seconds: 18_000,
-          reset_at: 1_773_987_355,
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-create-task",
+        method: "POST",
+        url: "/wham/tasks",
+        headers: {
+          "content-type": "application/json",
+          "x-test-header": "keep-me",
         },
-        secondary_window: {
-          used_percent: 100,
-          limit_window_seconds: 604_800,
-          reset_at: 1_774_067_036,
-        },
-        limit_reached: true,
-        allowed: false,
-      },
-      additional_rate_limits: [
+        body: JSON.stringify({
+          prompt: "ship it",
+        }),
+      });
+
+      await waitForCondition(() =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-wham-create-task")),
+      );
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([
         {
-          limit_name: "gpt-5.3-codex-spark",
-          rate_limit: {
-            primary_window: {
-              used_percent: 75,
-              limit_window_seconds: 18_000,
-              reset_at: 1_773_987_500,
-            },
-            secondary_window: {
-              used_percent: 50,
-              limit_window_seconds: 604_800,
-              reset_at: 1_774_067_200,
-            },
-            limit_reached: false,
-            allowed: true,
-          },
+          id: "env_1",
+          name: "Default",
         },
-      ],
+      ]);
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-tasks")).toEqual({
+        items: [{ id: "task_1", status: "running" }],
+        cursor: "cursor_1",
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-accounts")).toEqual({
+        accounts: [{ id: "acct_personal", status: "active" }],
+        account_ordering: ["acct_personal"],
+        default_account_id: "acct_personal",
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
+        plan_type: "plus",
+        credits: null,
+      });
+      expect(getFetchResponse(emittedMessages, "fetch-wham-create-task")).toMatchObject({
+        status: 201,
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-create-task")).toEqual({
+        id: "task_new",
+        status: "queued",
+      });
+
+      expect(proxiedRequests.map((request) => request.url)).toEqual([
+        "https://chatgpt.com/backend-api/wham/environments",
+        "https://chatgpt.com/backend-api/wham/tasks/list?limit=20&task_filter=current",
+        "https://chatgpt.com/backend-api/wham/accounts/check",
+        "https://chatgpt.com/backend-api/wham/usage",
+        "https://chatgpt.com/backend-api/wham/tasks",
+      ]);
+
+      for (const request of proxiedRequests) {
+        expect(request.headers.authorization).toBe("Bearer test-access-token");
+        expect(request.headers["chatgpt-account-id"]).toBe("acct_personal");
+        expect(request.headers.originator).toBe("codex_cli_rs");
+      }
+
+      expect(proxiedRequests.at(-1)).toMatchObject({
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "ship it",
+        }),
+      });
+      expect(proxiedRequests.at(-1)?.headers["x-test-header"]).toBe("keep-me");
+      expect(fetchSpy).toHaveBeenCalledTimes(5);
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "managed auth file is missing",
+      auth: null,
+    },
+    {
+      name: "managed auth is missing an access token",
+      auth: {
+        accountId: "acct_personal",
+      },
+    },
+    {
+      name: "managed auth is missing an account id",
+      auth: {
+        accessToken: "test-access-token",
+      },
+    },
+  ])("falls back to local placeholder wham responses when $name", async ({ auth }) => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+
+    if (auth) {
+      await writeCodexAuthFile(codexHome, auth);
+    }
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
     });
 
-    await bridge.close();
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-environments",
+        method: "GET",
+        url: "/wham/environments",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-tasks",
+        method: "GET",
+        url: "/wham/tasks/list?limit=20&task_filter=current",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-accounts",
+        method: "GET",
+        url: "/wham/accounts/check",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-wham-usage")));
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([]);
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-tasks")).toEqual({
+        items: [],
+        tasks: [],
+        nextCursor: null,
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-accounts")).toEqual({
+        accounts: [],
+        account_ordering: [],
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
+        credits: null,
+        plan_type: null,
+        rate_limit_name: null,
+        rate_limit: null,
+        additional_rate_limits: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it("refreshes managed auth and retries wham requests once after a 401", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    await writeCodexAuthFile(codexHome, {
+      accessToken: "stale-access-token",
+      accountId: "acct_stale",
+    });
+
+    const proxiedRequests: Array<{ headers: Record<string, string> }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const headers = normalizeFetchRequestHeaders(init?.headers);
+      proxiedRequests.push({ headers });
+
+      if (headers.authorization === "Bearer stale-access-token") {
+        await writeCodexAuthFile(codexHome, {
+          accessToken: "fresh-access-token",
+          accountId: "acct_fresh",
+        });
+        return createJsonResponse(
+          {
+            error: "expired",
+          },
+          401,
+        );
+      }
+
+      if (headers.authorization === "Bearer fresh-access-token") {
+        return createJsonResponse([{ id: "env_1" }]);
+      }
+
+      throw new Error("Unexpected auth header");
+    });
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-environments",
+        method: "GET",
+        url: "/wham/environments",
+      });
+
+      await waitForCondition(() =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-wham-environments")),
+      );
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([
+        {
+          id: "env_1",
+        },
+      ]);
+      expect(proxiedRequests).toHaveLength(2);
+      expect(proxiedRequests[0]?.headers.authorization).toBe("Bearer stale-access-token");
+      expect(proxiedRequests[1]?.headers.authorization).toBe("Bearer fresh-access-token");
+      expect(mockLocalRequests).toContainEqual({
+        method: "account/read",
+        params: {
+          refreshToken: true,
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
   });
 
   it("returns a safe local usage fallback when account rate limits cannot be read", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       throw new Error("Unexpected remote fetch");
     });
@@ -2074,6 +2258,62 @@ async function writeDesktopGlobalState(
   );
 
   return statePath;
+}
+
+async function writeCodexAuthFile(
+  codexHome: string,
+  auth: {
+    accessToken?: string;
+    accountId?: string;
+  },
+): Promise<string> {
+  const authPath = join(codexHome, "auth.json");
+  await writeFile(
+    authPath,
+    `${JSON.stringify(
+      {
+        tokens: {
+          access_token: auth.accessToken,
+          account_id: auth.accountId,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  return authPath;
+}
+
+function createJsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+    },
+  });
+}
+
+function normalizeFetchRequestHeaders(headers: HeadersInit | undefined): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  const requestHeaders = new Headers(headers);
+  requestHeaders.forEach((value, key) => {
+    normalized[key] = value;
+  });
+  return normalized;
+}
+
+function normalizeFetchRequestBody(body: BodyInit | null | undefined): string | null {
+  if (typeof body === "string") {
+    return body;
+  }
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body).toString("utf8");
+  }
+  if (body === null || body === undefined) {
+    return null;
+  }
+  throw new Error(`Unsupported fetch request body in test: ${body.constructor.name}`);
 }
 
 function getFetchResponse(messages: unknown[], requestId: string) {
