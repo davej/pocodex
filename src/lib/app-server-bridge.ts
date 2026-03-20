@@ -116,6 +116,65 @@ interface GitOriginsResponse {
   homeDir: string;
 }
 
+type UsageVisibilityPlan = "plus" | "pro" | "prolite";
+
+interface LocalRateLimitWindowSnapshot {
+  usedPercent: number | null;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+interface LocalCreditsSnapshot {
+  hasCredits: boolean | null;
+  unlimited: boolean | null;
+  balance: string | null;
+}
+
+interface LocalRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  primary: LocalRateLimitWindowSnapshot | null;
+  secondary: LocalRateLimitWindowSnapshot | null;
+  credits: LocalCreditsSnapshot | null;
+  planType: string | null;
+}
+
+interface WhamUsageWindowPayload {
+  used_percent: number | null;
+  limit_window_seconds: number | null;
+  reset_at: number | null;
+}
+
+interface WhamUsageRateLimitPayload {
+  primary_window: WhamUsageWindowPayload | null;
+  secondary_window: WhamUsageWindowPayload | null;
+  limit_reached: boolean;
+  allowed: boolean;
+}
+
+interface WhamAdditionalRateLimitPayload {
+  limit_name: string | null;
+  rate_limit: WhamUsageRateLimitPayload;
+}
+
+interface WhamUsagePayload {
+  credits: {
+    has_credits: boolean | null;
+    unlimited: boolean | null;
+    balance: string | null;
+  } | null;
+  plan_type: string | null;
+  rate_limit_name: string | null;
+  rate_limit: WhamUsageRateLimitPayload | null;
+  additional_rate_limits: WhamAdditionalRateLimitPayload[];
+}
+
+const USAGE_CORE_LIMIT_ID = "codex";
+const LOCAL_UNSUPPORTED_FETCH_STATUS = 501;
+const LOCAL_UNSUPPORTED_FETCH_BODY = {
+  error: "unsupported in Pocodex",
+};
+
 export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly hostId: string;
@@ -932,7 +991,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       }
 
       if (message.url.startsWith("/")) {
-        const handled = await this.handleRelativeFetchRequest(message.url);
+        const handled = await this.handleRelativeFetchRequest(
+          message.url,
+          typeof message.method === "string" ? message.method : "GET",
+        );
         if (handled) {
           this.emitFetchSuccess(message.requestId, handled.body, handled.status);
           return;
@@ -1352,9 +1414,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "account-info":
         return {
           status: 200,
-          body: {
-            plan: null,
-          },
+          body: await this.readAccountInfo(),
         };
       case "get-configuration":
         return {
@@ -1386,9 +1446,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleRelativeFetchRequest(
-    url: string,
+    rawUrl: string,
+    method: string,
   ): Promise<{ status: number; body: unknown } | null> {
-    if (url === "/wham/accounts/check") {
+    const pathname = new URL(rawUrl, "https://chatgpt.com").pathname;
+    const normalizedMethod = method.toUpperCase();
+
+    if (pathname === "/wham/accounts/check" && normalizedMethod === "GET") {
       return {
         status: 200,
         body: {
@@ -1398,25 +1462,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       };
     }
 
-    if (url === "/wham/environments") {
+    if (pathname === "/wham/environments" && normalizedMethod === "GET") {
       return {
         status: 200,
         body: [],
       };
     }
 
-    if (url === "/wham/usage") {
+    if (pathname === "/wham/usage" && normalizedMethod === "GET") {
       return {
         status: 200,
-        body: {
-          credits: null,
-          plan_type: null,
-          rate_limit: null,
-        },
+        body: await this.readWhamUsage(),
       };
     }
 
-    if (url.startsWith("/wham/tasks/list")) {
+    if (pathname === "/wham/tasks/list" && normalizedMethod === "GET") {
       return {
         status: 200,
         body: {
@@ -1427,7 +1487,69 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       };
     }
 
+    if (pathname === "/subscriptions/auto_top_up/settings" && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          is_enabled: false,
+          recharge_threshold: null,
+          recharge_target: null,
+        },
+      };
+    }
+
+    if (pathname.startsWith("/accounts/check/") && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          accounts: {},
+        },
+      };
+    }
+
+    if (pathname.startsWith("/checkout_pricing_config/configs/") && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          currency_config: null,
+        },
+      };
+    }
+
+    if (
+      normalizedMethod === "POST" &&
+      (pathname === "/subscriptions/auto_top_up/enable" ||
+        pathname === "/subscriptions/auto_top_up/update" ||
+        pathname === "/subscriptions/auto_top_up/disable")
+    ) {
+      return {
+        status: LOCAL_UNSUPPORTED_FETCH_STATUS,
+        body: LOCAL_UNSUPPORTED_FETCH_BODY,
+      };
+    }
+
+    if (pathname === "/payments/customer_portal" && normalizedMethod === "GET") {
+      return {
+        status: LOCAL_UNSUPPORTED_FETCH_STATUS,
+        body: LOCAL_UNSUPPORTED_FETCH_BODY,
+      };
+    }
+
     return null;
+  }
+
+  private async readAccountInfo(): Promise<{ plan: UsageVisibilityPlan | null }> {
+    const result = await this.sendLocalRequestSafely("account/read", {
+      refreshToken: false,
+    });
+    return {
+      plan: readUsageVisibilityPlanFromAccount(result),
+    };
+  }
+
+  private async readWhamUsage(): Promise<WhamUsagePayload> {
+    const result = await this.sendLocalRequestSafely("account/rateLimits/read");
+    return buildWhamUsagePayload(result);
   }
 
   private readGlobalState(body: unknown): Record<string, unknown> {
@@ -1828,6 +1950,18 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
+  private async sendLocalRequestSafely(method: string, params?: unknown): Promise<unknown | null> {
+    try {
+      return await this.sendLocalRequest(method, params);
+    } catch (error) {
+      debugLog("app-server", "failed to handle local bridge request", {
+        error: normalizeError(error).message,
+        method,
+      });
+      return null;
+    }
+  }
+
   private async sendLocalRequest(method: string, params?: unknown): Promise<unknown> {
     const id = `pocodex-local-${++this.nextRequestId}`;
     return new Promise<unknown>((resolve, reject) => {
@@ -2026,6 +2160,193 @@ function extractJsonRpcErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function readUsageVisibilityPlanFromAccount(result: unknown): UsageVisibilityPlan | null {
+  const account = isJsonRecord(result) && isJsonRecord(result.account) ? result.account : null;
+  return normalizeUsageVisibilityPlan(account?.planType);
+}
+
+function normalizeUsageVisibilityPlan(planType: unknown): UsageVisibilityPlan | null {
+  switch (planType) {
+    case "plus":
+    case "pro":
+    case "prolite":
+      return planType;
+    default:
+      return null;
+  }
+}
+
+function buildWhamUsagePayload(result: unknown): WhamUsagePayload {
+  const emptyPayload = buildEmptyWhamUsagePayload();
+  if (!isJsonRecord(result)) {
+    return emptyPayload;
+  }
+
+  const rateLimits = normalizeLocalRateLimitSnapshot(result.rateLimits);
+  if (!hasLocalRateLimitSnapshotData(rateLimits)) {
+    return emptyPayload;
+  }
+
+  const additionalRateLimits = isJsonRecord(result.rateLimitsByLimitId)
+    ? Object.entries(result.rateLimitsByLimitId).flatMap(([limitId, snapshot]) =>
+        normalizeLimitId(limitId) === USAGE_CORE_LIMIT_ID
+          ? []
+          : buildAdditionalWhamRateLimitPayload(snapshot),
+      )
+    : [];
+
+  return {
+    credits: buildWhamCreditsPayload(rateLimits.credits),
+    plan_type: rateLimits.planType,
+    rate_limit_name: rateLimits.limitName,
+    rate_limit: buildWhamRateLimitPayload(rateLimits),
+    additional_rate_limits: additionalRateLimits,
+  };
+}
+
+function buildEmptyWhamUsagePayload(): WhamUsagePayload {
+  return {
+    credits: null,
+    plan_type: null,
+    rate_limit_name: null,
+    rate_limit: null,
+    additional_rate_limits: [],
+  };
+}
+
+function buildAdditionalWhamRateLimitPayload(snapshot: unknown): WhamAdditionalRateLimitPayload[] {
+  const normalizedSnapshot = normalizeLocalRateLimitSnapshot(snapshot);
+  if (!hasLocalRateLimitSnapshotData(normalizedSnapshot)) {
+    return [];
+  }
+
+  return [
+    {
+      limit_name: normalizedSnapshot.limitName,
+      rate_limit: buildWhamRateLimitPayload(normalizedSnapshot),
+    },
+  ];
+}
+
+function buildWhamCreditsPayload(
+  credits: LocalCreditsSnapshot | null,
+): WhamUsagePayload["credits"] {
+  if (!credits) {
+    return null;
+  }
+
+  return {
+    has_credits: credits.hasCredits,
+    unlimited: credits.unlimited,
+    balance: credits.balance,
+  };
+}
+
+function buildWhamRateLimitPayload(snapshot: LocalRateLimitSnapshot): WhamUsageRateLimitPayload {
+  const limitReached = isLocalRateLimitReached(snapshot);
+  return {
+    primary_window: buildWhamWindowPayload(snapshot.primary),
+    secondary_window: buildWhamWindowPayload(snapshot.secondary),
+    limit_reached: limitReached,
+    allowed: !limitReached,
+  };
+}
+
+function buildWhamWindowPayload(
+  window: LocalRateLimitWindowSnapshot | null,
+): WhamUsageWindowPayload | null {
+  if (!window) {
+    return null;
+  }
+
+  return {
+    used_percent: window.usedPercent,
+    limit_window_seconds:
+      window.windowDurationMins === null ? null : Math.round(window.windowDurationMins * 60),
+    reset_at: window.resetsAt,
+  };
+}
+
+function isLocalRateLimitReached(snapshot: LocalRateLimitSnapshot): boolean {
+  return [snapshot.primary, snapshot.secondary].some(
+    (window) => window !== null && window.usedPercent !== null && window.usedPercent >= 100,
+  );
+}
+
+function hasLocalRateLimitSnapshotData(
+  snapshot: LocalRateLimitSnapshot | null,
+): snapshot is LocalRateLimitSnapshot {
+  if (!snapshot) {
+    return false;
+  }
+
+  return (
+    snapshot.limitId !== null ||
+    snapshot.limitName !== null ||
+    snapshot.primary !== null ||
+    snapshot.secondary !== null ||
+    snapshot.credits !== null ||
+    snapshot.planType !== null
+  );
+}
+
+function normalizeLocalRateLimitSnapshot(value: unknown): LocalRateLimitSnapshot | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    limitId: readOptionalString(value.limitId),
+    limitName: readOptionalString(value.limitName),
+    primary: normalizeLocalRateLimitWindowSnapshot(value.primary),
+    secondary: normalizeLocalRateLimitWindowSnapshot(value.secondary),
+    credits: normalizeLocalCreditsSnapshot(value.credits),
+    planType: readOptionalString(value.planType),
+  };
+}
+
+function normalizeLocalRateLimitWindowSnapshot(
+  value: unknown,
+): LocalRateLimitWindowSnapshot | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    usedPercent: readOptionalNumber(value.usedPercent),
+    windowDurationMins: readOptionalNumber(value.windowDurationMins),
+    resetsAt: readOptionalNumber(value.resetsAt),
+  };
+}
+
+function normalizeLocalCreditsSnapshot(value: unknown): LocalCreditsSnapshot | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    hasCredits: readOptionalBoolean(value.hasCredits),
+    unlimited: readOptionalBoolean(value.unlimited),
+    balance: readOptionalString(value.balance),
+  };
+}
+
+function normalizeLimitId(limitId: string): string {
+  return limitId.trim().toLowerCase();
+}
+
+function readOptionalString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function readOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
 }
 
 function parseJsonBody(body: unknown): unknown {

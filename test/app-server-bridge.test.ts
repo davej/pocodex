@@ -19,6 +19,7 @@ vi.mock("node-pty", () => ({
 }));
 
 let mockLocalThreadListData: unknown[] = [];
+const mockLocalRequestResults = new Map<string, unknown>();
 const mockLocalRequestErrors = new Map<string, string>();
 const tempDirs: string[] = [];
 const mockPtys: MockPty[] = [];
@@ -81,79 +82,33 @@ class MockChildProcess extends EventEmitter {
           id?: string | number;
           method?: string;
         };
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          message.method === "initialize"
-        ) {
-          setImmediate(() => {
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                result: {
-                  ok: true,
-                },
-              })}\n`,
-            );
-          });
+        if (!String(message.id ?? "").startsWith("pocodex-local-")) {
+          continue;
         }
 
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          message.method === "config/read"
-        ) {
-          setImmediate(() => {
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                result: {
-                  ok: true,
-                },
-              })}\n`,
-            );
-          });
+        const localRequest =
+          typeof message.method === "string" ? buildMockLocalRequestResponse(message.method) : null;
+        if (!localRequest) {
+          continue;
         }
 
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          message.method === "thread/list"
-        ) {
-          setImmediate(() => {
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                result: {
-                  data: mockLocalThreadListData,
-                  nextCursor: null,
-                },
-              })}\n`,
-            );
-          });
-        }
-
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          (message.method === "thread/archive" || message.method === "thread/unarchive")
-        ) {
-          setImmediate(() => {
-            const errorMessage = mockLocalRequestErrors.get(message.method);
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                ...(errorMessage
-                  ? {
-                      error: {
-                        message: errorMessage,
-                      },
-                    }
-                  : {
-                      result: {
-                        ok: true,
-                      },
-                    }),
-              })}\n`,
-            );
-          });
-        }
+        setImmediate(() => {
+          const errorMessage = mockLocalRequestErrors.get(localRequest.method);
+          this.stdout.write(
+            `${JSON.stringify({
+              id: message.id,
+              ...(errorMessage
+                ? {
+                    error: {
+                      message: errorMessage,
+                    },
+                  }
+                : {
+                    result: localRequest.result,
+                  }),
+            })}\n`,
+          );
+        });
       }
     });
   }
@@ -255,6 +210,7 @@ describe("AppServerBridge", () => {
       await rm(directory, { recursive: true, force: true });
     }
     mockLocalThreadListData = [];
+    mockLocalRequestResults.clear();
     mockLocalRequestErrors.clear();
     mockPtys.length = 0;
     if (originalCodexHome === undefined) {
@@ -1446,6 +1402,67 @@ describe("AppServerBridge", () => {
   });
 
   it("stubs wham endpoints locally instead of proxying to chatgpt.com", async () => {
+    mockLocalRequestResults.set("account/rateLimits/read", {
+      rateLimits: {
+        limitId: "codex",
+        limitName: null,
+        primary: {
+          usedPercent: 25,
+          windowDurationMins: 300,
+          resetsAt: 1_773_987_355,
+        },
+        secondary: {
+          usedPercent: 100,
+          windowDurationMins: 10_080,
+          resetsAt: 1_774_067_036,
+        },
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          balance: "650.5200000000",
+        },
+        planType: "plus",
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: "codex",
+          limitName: null,
+          primary: {
+            usedPercent: 25,
+            windowDurationMins: 300,
+            resetsAt: 1_773_987_355,
+          },
+          secondary: {
+            usedPercent: 100,
+            windowDurationMins: 10_080,
+            resetsAt: 1_774_067_036,
+          },
+          credits: {
+            hasCredits: true,
+            unlimited: false,
+            balance: "650.5200000000",
+          },
+          planType: "plus",
+        },
+        "gpt-5.3-codex-spark": {
+          limitId: "gpt-5.3-codex-spark",
+          limitName: "gpt-5.3-codex-spark",
+          primary: {
+            usedPercent: 75,
+            windowDurationMins: 300,
+            resetsAt: 1_773_987_500,
+          },
+          secondary: {
+            usedPercent: 50,
+            windowDurationMins: 10_080,
+            resetsAt: 1_774_067_200,
+          },
+          credits: null,
+          planType: "plus",
+        },
+      },
+    });
+
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -1498,12 +1515,241 @@ describe("AppServerBridge", () => {
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
-      credits: null,
-      plan_type: null,
-      rate_limit: null,
+      credits: {
+        has_credits: true,
+        unlimited: false,
+        balance: "650.5200000000",
+      },
+      plan_type: "plus",
+      rate_limit_name: null,
+      rate_limit: {
+        primary_window: {
+          used_percent: 25,
+          limit_window_seconds: 18_000,
+          reset_at: 1_773_987_355,
+        },
+        secondary_window: {
+          used_percent: 100,
+          limit_window_seconds: 604_800,
+          reset_at: 1_774_067_036,
+        },
+        limit_reached: true,
+        allowed: false,
+      },
+      additional_rate_limits: [
+        {
+          limit_name: "gpt-5.3-codex-spark",
+          rate_limit: {
+            primary_window: {
+              used_percent: 75,
+              limit_window_seconds: 18_000,
+              reset_at: 1_773_987_500,
+            },
+            secondary_window: {
+              used_percent: 50,
+              limit_window_seconds: 604_800,
+              reset_at: 1_774_067_200,
+            },
+            limit_reached: false,
+            allowed: true,
+          },
+        },
+      ],
     });
 
     await bridge.close();
+  });
+
+  it("returns a safe local usage fallback when account rate limits cannot be read", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+    mockLocalRequestErrors.set("account/rateLimits/read", "rate limits unavailable");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage-fallback",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await waitForCondition(() => emittedMessages.length >= 1);
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage-fallback")).toEqual({
+        credits: null,
+        plan_type: null,
+        rate_limit_name: null,
+        rate_limit: null,
+        additional_rate_limits: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it("reads account info from the local app server and filters unsupported plans", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    mockLocalRequestResults.set("account/read", {
+      account: {
+        planType: "plus",
+      },
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-account-plus",
+      method: "POST",
+      url: "vscode://codex/account-info",
+    });
+
+    mockLocalRequestResults.set("account/read", {
+      account: {
+        planType: "enterprise",
+      },
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-account-unsupported",
+      method: "POST",
+      url: "vscode://codex/account-info",
+    });
+
+    mockLocalRequestErrors.set("account/read", "account unavailable");
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-account-error",
+      method: "POST",
+      url: "vscode://codex/account-info",
+    });
+
+    await waitForCondition(() => emittedMessages.length >= 3);
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-account-plus")).toEqual({
+      plan: "plus",
+    });
+    expect(getFetchJsonBody(emittedMessages, "fetch-account-unsupported")).toEqual({
+      plan: null,
+    });
+    expect(getFetchJsonBody(emittedMessages, "fetch-account-error")).toEqual({
+      plan: null,
+    });
+
+    await bridge.close();
+  });
+
+  it("serves read-only billing endpoints locally and blocks unsupported billing actions", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-settings",
+        method: "GET",
+        url: "/subscriptions/auto_top_up/settings",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-accounts-check-versioned",
+        method: "GET",
+        url: "/accounts/check/v4-2023-04-27",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-pricing-config",
+        method: "GET",
+        url: "/checkout_pricing_config/configs/USD",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-enable",
+        method: "POST",
+        url: "/subscriptions/auto_top_up/enable",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-update",
+        method: "POST",
+        url: "/subscriptions/auto_top_up/update",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-disable",
+        method: "POST",
+        url: "/subscriptions/auto_top_up/disable",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-customer-portal",
+        method: "GET",
+        url: "/payments/customer_portal",
+      });
+
+      await waitForCondition(() => emittedMessages.length >= 7);
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-auto-top-up-settings")).toEqual({
+        is_enabled: false,
+        recharge_threshold: null,
+        recharge_target: null,
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-accounts-check-versioned")).toEqual({
+        accounts: {},
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-pricing-config")).toEqual({
+        currency_config: null,
+      });
+
+      for (const requestId of [
+        "fetch-auto-top-up-enable",
+        "fetch-auto-top-up-update",
+        "fetch-auto-top-up-disable",
+        "fetch-customer-portal",
+      ]) {
+        expect(getFetchResponse(emittedMessages, requestId)).toMatchObject({
+          type: "fetch-response",
+          requestId,
+          responseType: "success",
+          status: 501,
+        });
+        expect(getFetchJsonBody(emittedMessages, requestId)).toEqual({
+          error: "unsupported in Pocodex",
+        });
+      }
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
   });
 
   it("delegates git worker messages through the desktop worker bridge", async () => {
@@ -1731,6 +1977,57 @@ async function createBridge(
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,
   });
+}
+
+function buildMockLocalRequestResponse(method: string): {
+  method: string;
+  result: unknown;
+} | null {
+  switch (method) {
+    case "initialize":
+    case "config/read":
+      return {
+        method,
+        result: {
+          ok: true,
+        },
+      };
+    case "thread/list":
+      return {
+        method,
+        result: {
+          data: mockLocalThreadListData,
+          nextCursor: null,
+        },
+      };
+    case "thread/archive":
+    case "thread/unarchive":
+      return {
+        method,
+        result: {
+          ok: true,
+        },
+      };
+    case "account/read":
+      return {
+        method,
+        result: mockLocalRequestResults.get(method) ?? {
+          account: {
+            planType: null,
+          },
+        },
+      };
+    case "account/rateLimits/read":
+      return {
+        method,
+        result: mockLocalRequestResults.get(method) ?? {
+          rateLimits: null,
+          rateLimitsByLimitId: {},
+        },
+      };
+    default:
+      return null;
+  }
 }
 
 async function writeDesktopGlobalState(
