@@ -1032,7 +1032,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
         const response = await fetch(new URL(message.url, "https://chatgpt.com"), {
           method: typeof message.method === "string" ? message.method : "GET",
-          headers: normalizeHeaders(message.headers),
+          headers: buildOutboundFetchHeaders(message.headers, message.body),
           body: normalizeRequestBody(message.body),
           signal: controller.signal,
         });
@@ -1051,7 +1051,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
       const response = await fetch(message.url, {
         method: typeof message.method === "string" ? message.method : "GET",
-        headers: normalizeHeaders(message.headers),
+        headers: buildOutboundFetchHeaders(message.headers, message.body),
         body: normalizeRequestBody(message.body),
         signal: controller.signal,
       });
@@ -1561,7 +1561,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   ): Promise<RelativeFetchResponse> {
     const sourceUrl = new URL(request.rawUrl, "https://chatgpt.com");
     const targetUrl = new URL(`/backend-api${sourceUrl.pathname}${sourceUrl.search}`, sourceUrl);
-    const headers = new Headers(normalizeHeaders(request.headers));
+    const headers = new Headers(buildOutboundFetchHeaders(request.headers, request.body));
     headers.set("Authorization", `Bearer ${auth.accessToken}`);
     headers.set("chatgpt-account-id", auth.accountId);
     headers.set("originator", "codex_cli_rs");
@@ -2527,6 +2527,34 @@ function normalizeHeaders(headers: unknown): Record<string, string> | undefined 
     }
   }
   return normalized;
+}
+
+function buildOutboundFetchHeaders(
+  headers: unknown,
+  body: unknown,
+): Record<string, string> | undefined {
+  const normalized = normalizeHeaders(headers) ?? {};
+
+  if (shouldInferJsonContentType(normalized, body)) {
+    normalized["content-type"] = "application/json";
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function shouldInferJsonContentType(headers: Record<string, string>, body: unknown): boolean {
+  if (typeof body !== "string") {
+    return false;
+  }
+
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === "content-type") {
+      return false;
+    }
+  }
+
+  const parsed = parseJsonBody(body);
+  return parsed !== null && typeof parsed === "object";
 }
 
 function normalizeRequestBody(body: unknown): BodyInit | undefined {

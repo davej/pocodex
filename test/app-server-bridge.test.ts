@@ -1525,7 +1525,6 @@ describe("AppServerBridge", () => {
         method: "POST",
         url: "/wham/tasks",
         headers: {
-          "content-type": "application/json",
           "x-test-header": "keep-me",
         },
         body: JSON.stringify({
@@ -1584,6 +1583,7 @@ describe("AppServerBridge", () => {
           prompt: "ship it",
         }),
       });
+      expect(proxiedRequests.at(-1)?.headers["content-type"]).toBe("application/json");
       expect(proxiedRequests.at(-1)?.headers["x-test-header"]).toBe("keep-me");
       expect(fetchSpy).toHaveBeenCalledTimes(5);
     } finally {
