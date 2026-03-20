@@ -62,6 +62,11 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   const POCODEX_STYLESHEET_ID = "pocodex-stylesheet";
   const TOKEN_STORAGE_KEY = "__pocodex_token";
+  const THREAD_QUERY_KEY = "thread";
+  const LEGACY_INITIAL_ROUTE_QUERY_KEY = "initialRoute";
+  const INDEX_HTML_PATHNAME = "/index.html";
+  const LOCAL_HOST_ID = "local";
+  const LOCAL_THREAD_ROUTE_PREFIX = "/local/";
   const RETRY_DELAYS_MS = [1000, 2000, 5000, 8000, 12000] as const;
   const SESSION_CHECK_PATH = "/session-check";
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
@@ -90,12 +95,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   let heartbeatMonitorTimer: number | null = null;
   let lastServerHeartbeatAt = 0;
   let wakeGraceDeadline = 0;
+  let hasScheduledInitialThreadRestore = false;
 
   toastHost.id = "pocodex-toast-host";
   statusHost.id = "pocodex-status-host";
   importHost.id = "pocodex-import-host";
   importHost.hidden = true;
   document.documentElement.dataset.pocodex = "true";
+  normalizeBrowserUrlForRefresh();
 
   runWhenDocumentReady(() => {
     ensureStylesheetLink(config.stylesheetHref);
@@ -104,6 +111,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     ensureHostAttached(importHost);
     startOpenInAppObserver();
     startImportUiObserver();
+    installNewThreadNavigationSync();
     installMobileSidebarThreadNavigationClose();
   });
 
@@ -237,6 +245,30 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     document.addEventListener("click", handleMobileContentPaneClick, true);
   }
 
+  function installNewThreadNavigationSync(): void {
+    document.addEventListener("click", handleNewThreadTriggerClick, true);
+  }
+
+  function handleNewThreadTriggerClick(event: MouseEvent): void {
+    if (!isPrimaryUnmodifiedClick(event)) {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+
+    const nearestInteractive = target.closest(
+      'button, a, input, select, textarea, [role="button"], [role="menuitem"]',
+    );
+    if (!nearestInteractive || !isNewThreadTrigger(nearestInteractive)) {
+      return;
+    }
+
+    clearThreadQuery();
+  }
+
   function handleMobileSidebarThreadClick(event: MouseEvent): void {
     if (!isMobileSidebarViewport() || !isPrimaryUnmodifiedClick(event)) {
       return;
@@ -259,10 +291,13 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return;
     }
 
-    if (
-      isMobileSidebarThreadRow(nearestInteractive) ||
-      isMobileSidebarNewThreadTrigger(nearestInteractive)
-    ) {
+    if (isMobileSidebarThreadRow(nearestInteractive)) {
+      scheduleMobileSidebarClose();
+      return;
+    }
+
+    if (isNewThreadTrigger(nearestInteractive)) {
+      clearThreadQuery();
       scheduleMobileSidebarClose();
     }
   }
@@ -296,11 +331,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return false;
   }
 
-  function isMobileSidebarNewThreadTrigger(element: Element): boolean {
-    if (
-      !element.closest('nav[role="navigation"]') ||
-      (element.tagName !== "BUTTON" && element.tagName !== "A")
-    ) {
+  function isNewThreadTrigger(element: Element): boolean {
+    if (element.tagName !== "BUTTON" && element.tagName !== "A") {
       return false;
     }
 
@@ -882,6 +914,212 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return false;
   }
 
+  function normalizeBrowserUrlForRefresh(): void {
+    const currentUrl = new URL(window.location.href);
+    const legacyInitialRoute = readLegacyInitialRoute(currentUrl);
+    const hasNonLocalLegacyInitialRoute =
+      legacyInitialRoute !== null &&
+      extractLocalConversationIdFromRoute(legacyInitialRoute) === null;
+    const conversationId =
+      readThreadQueryConversationId(currentUrl) ??
+      extractLocalConversationIdFromRoute(legacyInitialRoute) ??
+      extractLocalConversationIdFromRoute(currentUrl.pathname);
+    if (conversationId) {
+      replaceThreadQuery(conversationId);
+      return;
+    }
+
+    if (currentUrl.searchParams.has(THREAD_QUERY_KEY)) {
+      replaceThreadQuery(null, {
+        preserveLegacyInitialRoute: hasNonLocalLegacyInitialRoute,
+      });
+      return;
+    }
+
+    if (
+      currentUrl.searchParams.has(LEGACY_INITIAL_ROUTE_QUERY_KEY) &&
+      !hasNonLocalLegacyInitialRoute
+    ) {
+      clearThreadQuery();
+    }
+  }
+
+  function readThreadQueryConversationId(url: URL = new URL(window.location.href)): string | null {
+    return normalizeRestorableConversationId(url.searchParams.get(THREAD_QUERY_KEY));
+  }
+
+  function readLegacyInitialRoute(url: URL = new URL(window.location.href)): string | null {
+    const initialRoute = url.searchParams.get(LEGACY_INITIAL_ROUTE_QUERY_KEY)?.trim();
+    return initialRoute ? initialRoute : null;
+  }
+
+  function getServedPathname(url: URL): string {
+    return url.pathname === INDEX_HTML_PATHNAME ? INDEX_HTML_PATHNAME : "/";
+  }
+
+  function replaceThreadQuery(
+    conversationId: string | null,
+    options: {
+      preserveLegacyInitialRoute?: boolean;
+    } = {},
+  ): void {
+    const currentUrl = new URL(window.location.href);
+    const nextUrl = new URL(currentUrl.toString());
+    nextUrl.pathname = getServedPathname(currentUrl);
+    if (!options.preserveLegacyInitialRoute) {
+      nextUrl.searchParams.delete(LEGACY_INITIAL_ROUTE_QUERY_KEY);
+    }
+    if (conversationId) {
+      nextUrl.searchParams.set(THREAD_QUERY_KEY, conversationId);
+    } else {
+      nextUrl.searchParams.delete(THREAD_QUERY_KEY);
+    }
+
+    if (nextUrl.toString() === currentUrl.toString()) {
+      return;
+    }
+
+    window.history.replaceState(null, "", nextUrl.toString());
+  }
+
+  function buildLocalConversationRoute(conversationId: string): string {
+    return `${LOCAL_THREAD_ROUTE_PREFIX}${encodeURIComponent(conversationId)}`;
+  }
+
+  function setThreadQueryForConversation(conversationId: string): void {
+    replaceThreadQuery(conversationId);
+  }
+
+  function clearThreadQuery(): void {
+    replaceThreadQuery(null);
+  }
+
+  function extractLocalConversationIdFromRoute(route: string | null): string | null {
+    if (!route) {
+      return null;
+    }
+
+    const trimmedRoute = route.trim();
+    if (!trimmedRoute.startsWith(LOCAL_THREAD_ROUTE_PREFIX)) {
+      return null;
+    }
+
+    const remainingRoute = trimmedRoute.slice(LOCAL_THREAD_ROUTE_PREFIX.length);
+    const separatorIndex = remainingRoute.search(/[/?#]/);
+    const encodedConversationId =
+      separatorIndex === -1 ? remainingRoute : remainingRoute.slice(0, separatorIndex);
+    if (!encodedConversationId) {
+      return null;
+    }
+
+    try {
+      return decodeURIComponent(encodedConversationId);
+    } catch {
+      return encodedConversationId;
+    }
+  }
+
+  function readNonEmptyString(value: unknown): string | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const trimmedValue = value.trim();
+    return trimmedValue.length > 0 ? trimmedValue : null;
+  }
+
+  function normalizeRestorableConversationId(value: unknown): string | null {
+    const conversationId = readNonEmptyString(value);
+    if (!conversationId || conversationId.startsWith("home:")) {
+      return null;
+    }
+
+    return conversationId;
+  }
+
+  function readConversationIdFromBridgeMessage(
+    message: Record<string, unknown> & { type: string },
+  ): string | null {
+    if (
+      message.type === "thread-role-request" ||
+      message.type === "terminal-create" ||
+      message.type === "terminal-attach" ||
+      message.type.startsWith("thread-follower-")
+    ) {
+      return readNonEmptyString(message.conversationId);
+    }
+
+    return null;
+  }
+
+  function syncThreadQueryWithBridgeMessage(message: unknown): void {
+    if (!isRecord(message) || typeof message.type !== "string") {
+      return;
+    }
+
+    const typedMessage = message as Record<string, unknown> & { type: string };
+    const rawConversationId = readConversationIdFromBridgeMessage(typedMessage);
+    if (rawConversationId) {
+      const conversationId = normalizeRestorableConversationId(rawConversationId);
+      if (conversationId) {
+        setThreadQueryForConversation(conversationId);
+      }
+      return;
+    }
+
+    switch (typedMessage.type) {
+      case "navigate-to-route": {
+        const path = readNonEmptyString(typedMessage.path);
+        if (!path) {
+          return;
+        }
+
+        const routeConversationId = extractLocalConversationIdFromRoute(path);
+        if (routeConversationId) {
+          const conversationId = normalizeRestorableConversationId(routeConversationId);
+          if (conversationId) {
+            setThreadQueryForConversation(conversationId);
+          } else {
+            clearThreadQuery();
+          }
+          return;
+        }
+
+        clearThreadQuery();
+        return;
+      }
+      case "new-chat":
+        clearThreadQuery();
+        return;
+      default:
+        return;
+    }
+  }
+
+  function scheduleInitialThreadRestoreFromUrl(): void {
+    if (hasScheduledInitialThreadRestore) {
+      return;
+    }
+
+    const conversationId = readThreadQueryConversationId();
+    if (!conversationId) {
+      return;
+    }
+
+    hasScheduledInitialThreadRestore = true;
+    window.setTimeout(() => {
+      dispatchHostMessage({
+        type: "navigate-to-route",
+        path: buildLocalConversationRoute(conversationId),
+      });
+      dispatchHostMessage({
+        type: "thread-stream-resume-request",
+        hostId: LOCAL_HOST_ID,
+        conversationId,
+      });
+    }, 0);
+  }
+
   function getStoredToken(): string {
     const url = new URL(window.location.href);
     const tokenFromQuery = url.searchParams.get("token");
@@ -1211,6 +1449,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         case "bridge_message":
           {
             const bridgeMessage = rewriteBridgeMessageForViewport(envelope.message);
+            syncThreadQueryWithBridgeMessage(bridgeMessage);
             if (handlePocodexBridgeMessage(bridgeMessage)) {
               break;
             }
@@ -1338,6 +1577,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         return;
       }
       sendEnvelope({ type: "bridge_message", message });
+      syncThreadQueryWithBridgeMessage(message);
+      if (isRecord(message) && message.type === "ready") {
+        scheduleInitialThreadRestoreFromUrl();
+      }
     },
     getPathForFile: () => null,
     sendWorkerMessageFromView: async (workerName, message) => {

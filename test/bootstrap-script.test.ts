@@ -4,6 +4,587 @@ import { describe, expect, it } from "vitest";
 
 import { renderBootstrapScript } from "../src/lib/bootstrap-script.js";
 
+type TestListener = (...args: unknown[]) => void;
+
+class TestEventTargetLike {
+  private readonly listeners = new Map<string, TestListener[]>();
+
+  addEventListener(type: string, listener: TestListener, _options?: unknown): void {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
+  removeEventListener(type: string, listener: TestListener): void {
+    const existing = this.listeners.get(type);
+    if (!existing) {
+      return;
+    }
+
+    const next = existing.filter((candidate) => candidate !== listener);
+    if (next.length === 0) {
+      this.listeners.delete(type);
+      return;
+    }
+
+    this.listeners.set(type, next);
+  }
+
+  dispatchEvent(event: { type: string }): boolean {
+    const listeners = this.listeners.get(event.type) ?? [];
+    for (const listener of listeners) {
+      listener(event);
+    }
+    return true;
+  }
+}
+
+class TestElement extends TestEventTargetLike {
+  readonly children: TestElement[] = [];
+  readonly dataset: Record<string, string> = {};
+  parentElement: TestElement | null = null;
+  hidden = false;
+  className = "";
+  id = "";
+  rel = "";
+  href = "";
+  textContent = "";
+  style: Record<string, string> = {};
+  private readonly attributes = new Map<string, string>();
+
+  constructor(readonly tagName: string) {
+    super();
+  }
+
+  appendChild<T extends TestElement>(child: T): T {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+
+  append(...nodes: TestElement[]): void {
+    for (const node of nodes) {
+      this.appendChild(node);
+    }
+  }
+
+  contains(node: TestElement): boolean {
+    let current: TestElement | null = node;
+    while (current) {
+      if (current === this) {
+        return true;
+      }
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  replaceChildren(...nodes: TestElement[]): void {
+    for (const child of this.children) {
+      child.parentElement = null;
+    }
+    this.children.length = 0;
+    this.append(...nodes);
+  }
+
+  remove(): void {
+    if (!this.parentElement) {
+      return;
+    }
+
+    const index = this.parentElement.children.indexOf(this);
+    if (index >= 0) {
+      this.parentElement.children.splice(index, 1);
+    }
+    this.parentElement = null;
+  }
+
+  after(node: TestElement): void {
+    if (!this.parentElement) {
+      return;
+    }
+
+    const siblings = this.parentElement.children;
+    const index = siblings.indexOf(this);
+    if (index === -1) {
+      return;
+    }
+
+    node.parentElement = this.parentElement;
+    siblings.splice(index + 1, 0, node);
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+    if (name === "id") {
+      this.id = value;
+    }
+    if (name === "class") {
+      this.className = value;
+    }
+    if (name === "href") {
+      this.href = value;
+    }
+    if (name === "rel") {
+      this.rel = value;
+    }
+    if (name.startsWith("data-")) {
+      const datasetKey = name
+        .slice("data-".length)
+        .replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+      this.dataset[datasetKey] = value;
+    }
+  }
+
+  getAttribute(name: string): string | null {
+    if (name === "id") {
+      return this.id || null;
+    }
+    if (name === "class") {
+      return this.className || null;
+    }
+    if (name === "href") {
+      return this.href || null;
+    }
+    if (name === "rel") {
+      return this.rel || null;
+    }
+    return this.attributes.get(name) ?? null;
+  }
+
+  querySelector(selector: string): TestElement | null {
+    for (const child of this.children) {
+      if (matchesTestSelector(child, selector)) {
+        return child;
+      }
+      const nested = child.querySelector(selector);
+      if (nested) {
+        return nested;
+      }
+    }
+    return null;
+  }
+
+  querySelectorAll(selector: string) {
+    const matches: TestElement[] = [];
+    if (selector === ":scope > button") {
+      for (const child of this.children) {
+        if (matchesTestSelector(child, "button")) {
+          matches.push(child);
+        }
+      }
+      return createTestNodeList(matches);
+    }
+
+    for (const child of this.children) {
+      collectTestMatches(child, selector, matches);
+    }
+    return createTestNodeList(matches);
+  }
+
+  closest(selector: string): TestElement | null {
+    if (matchesTestSelector(this, selector)) {
+      return this;
+    }
+
+    return this.parentElement?.closest(selector) ?? null;
+  }
+}
+
+class TestHTMLDivElement extends TestElement {
+  constructor() {
+    super("DIV");
+  }
+}
+
+class TestHTMLLinkElement extends TestElement {
+  constructor() {
+    super("LINK");
+  }
+}
+
+class TestDocument extends TestEventTargetLike {
+  readyState = "complete";
+  visibilityState = "visible";
+  documentElement = new TestElement("HTML");
+  head = new TestElement("HEAD");
+  body = new TestElement("BODY");
+
+  constructor() {
+    super();
+    this.documentElement.append(this.head, this.body);
+  }
+
+  createElement(tagName: string): TestElement {
+    switch (tagName.toLowerCase()) {
+      case "div":
+        return new TestHTMLDivElement();
+      case "link":
+        return new TestHTMLLinkElement();
+      default:
+        return new TestElement(tagName.toUpperCase());
+    }
+  }
+
+  querySelector(selector: string): TestElement | null {
+    return this.documentElement.querySelector(selector);
+  }
+
+  querySelectorAll(selector: string) {
+    return this.documentElement.querySelectorAll(selector);
+  }
+
+  getElementsByTagName(tagName: string): TestElement[] {
+    return tagName === "head" ? [this.head] : [];
+  }
+
+  getElementById(id: string): TestElement | null {
+    return findTestById(this.documentElement, id);
+  }
+
+  hasFocus(): boolean {
+    return true;
+  }
+}
+
+class TestMutationObserver {
+  constructor(_callback: (...args: unknown[]) => void) {}
+
+  observe(_target: TestElement, _options: unknown): void {}
+}
+
+class TestRequest {
+  method = "GET";
+
+  constructor(readonly url: string) {}
+}
+
+class TestResponse {
+  constructor(
+    readonly body: string,
+    readonly init: {
+      status: number;
+      headers: Record<string, string>;
+    },
+  ) {}
+}
+
+class TestMessageEvent {
+  constructor(
+    readonly type: string,
+    readonly init: { data: unknown },
+  ) {}
+}
+
+class TestMouseEvent {
+  readonly button: number;
+  readonly target: TestElement;
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly shiftKey: boolean;
+  defaultPrevented = false;
+
+  constructor(
+    readonly type: string,
+    options: {
+      button?: number;
+      target: TestElement;
+      metaKey?: boolean;
+      ctrlKey?: boolean;
+      altKey?: boolean;
+      shiftKey?: boolean;
+    },
+  ) {
+    this.button = options.button ?? 0;
+    this.target = options.target;
+    this.metaKey = options.metaKey ?? false;
+    this.ctrlKey = options.ctrlKey ?? false;
+    this.altKey = options.altKey ?? false;
+    this.shiftKey = options.shiftKey ?? false;
+  }
+
+  preventDefault(): void {
+    this.defaultPrevented = true;
+  }
+}
+
+class TestWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static latest: TestWebSocket | null = null;
+
+  readonly listeners = new Map<string, TestListener[]>();
+  readonly sentMessages: string[] = [];
+  readyState = TestWebSocket.CONNECTING;
+
+  constructor(readonly url: string) {
+    TestWebSocket.latest = this;
+  }
+
+  addEventListener(type: string, listener: TestListener): void {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
+  send(message: string): void {
+    this.sentMessages.push(message);
+  }
+
+  close(_code?: number, _reason?: string): void {
+    this.readyState = TestWebSocket.CLOSED;
+  }
+
+  emit(type: string, event: unknown): void {
+    const listeners = this.listeners.get(type) ?? [];
+    for (const listener of listeners) {
+      listener(event);
+    }
+  }
+}
+
+function createTestNodeList(matches: TestElement[]) {
+  return {
+    length: matches.length,
+    item(index: number): TestElement | null {
+      return matches[index] ?? null;
+    },
+    forEach(callback: (value: TestElement, key: number, parent: unknown) => void): void {
+      matches.forEach((value, index) => callback(value, index, matches));
+    },
+  };
+}
+
+function collectTestMatches(element: TestElement, selector: string, matches: TestElement[]): void {
+  if (matchesTestSelector(element, selector)) {
+    matches.push(element);
+  }
+  for (const child of element.children) {
+    collectTestMatches(child, selector, matches);
+  }
+}
+
+function findTestById(element: TestElement, id: string): TestElement | null {
+  if (element.id === id) {
+    return element;
+  }
+  for (const child of element.children) {
+    const match = findTestById(child, id);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
+function matchesTestSelector(element: TestElement, selector: string): boolean {
+  return selector
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .some((part) => matchesSingleTestSelector(element, part));
+}
+
+function matchesSingleTestSelector(element: TestElement, selector: string): boolean {
+  if (selector === "[data-thread-title]") {
+    return "threadTitle" in element.dataset;
+  }
+
+  if (selector.startsWith(".")) {
+    return element.className
+      .split(/\s+/)
+      .filter((part) => part.length > 0)
+      .includes(selector.slice(1));
+  }
+
+  const roleMatch = /^(?:(\w+))?\[role=['"]([^'"]+)['"]\]$/.exec(selector);
+  if (roleMatch) {
+    const [, tagName, role] = roleMatch;
+    return (
+      (tagName === undefined || element.tagName === tagName.toUpperCase()) &&
+      element.getAttribute("role") === role
+    );
+  }
+
+  return element.tagName === selector.toUpperCase();
+}
+
+function drainTestTimers(pendingTimers: Map<number, () => void>, maxRuns = 20): void {
+  for (let index = 0; index < maxRuns; index += 1) {
+    const next = pendingTimers.entries().next().value as [number, () => void] | undefined;
+    if (!next) {
+      return;
+    }
+
+    const [timerId, callback] = next;
+    pendingTimers.delete(timerId);
+    callback();
+  }
+}
+
+async function flushBootstrapMicrotasks(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+function createBootstrapHarness(
+  options: {
+    href?: string;
+    mobile?: boolean;
+  } = {},
+) {
+  const href = options.href ?? "http://127.0.0.1:8787/?token=secret";
+  const storage = new Map<string, string>();
+  const timers = new Map<number, () => void>();
+  const fetchCalls: Array<{ input: unknown; init: unknown }> = [];
+  const dispatchedMessages: unknown[] = [];
+  const replaceStateCalls: Array<string | URL | null | undefined> = [];
+  let nextTimerId = 1;
+
+  TestWebSocket.latest = null;
+
+  const document = new TestDocument();
+  const windowObject = new TestEventTargetLike() as TestEventTargetLike & {
+    location: {
+      href: string;
+      protocol: string;
+      host: string;
+      reload: () => void;
+    };
+    history: {
+      pushState: (data: unknown, unused: string, url?: string | URL | null) => void;
+      replaceState: (data: unknown, unused: string, url?: string | URL | null) => void;
+    };
+    fetch: (input: unknown, init?: unknown) => Promise<unknown>;
+    setTimeout: (callback: () => void, delay: number) => number;
+    clearTimeout: (id: number) => void;
+    matchMedia: (query: string) => { matches: boolean; media: string };
+    innerWidth: number;
+    locationReloaded: boolean;
+  };
+
+  const initialUrl = new URL(href);
+  windowObject.location = {
+    href: initialUrl.toString(),
+    protocol: initialUrl.protocol,
+    host: initialUrl.host,
+    reload: () => {
+      windowObject.locationReloaded = true;
+    },
+  };
+
+  const updateLocation = (url?: string | URL | null): void => {
+    if (!url) {
+      return;
+    }
+
+    const nextUrl = new URL(String(url), windowObject.location.href);
+    windowObject.location.href = nextUrl.toString();
+    windowObject.location.protocol = nextUrl.protocol;
+    windowObject.location.host = nextUrl.host;
+  };
+
+  windowObject.history = {
+    pushState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+      updateLocation(url);
+    },
+    replaceState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+      replaceStateCalls.push(url);
+      updateLocation(url);
+    },
+  };
+  windowObject.fetch = async (input: unknown, init?: unknown) => {
+    fetchCalls.push({ input, init });
+    return { ok: true, status: 200 };
+  };
+  windowObject.setTimeout = (callback: () => void) => {
+    const id = nextTimerId++;
+    timers.set(id, callback);
+    return id;
+  };
+  windowObject.clearTimeout = (id: number) => {
+    timers.delete(id);
+  };
+  windowObject.matchMedia = (query: string) => ({
+    matches: options.mobile === true && query.includes("max-width"),
+    media: query,
+  });
+  windowObject.innerWidth = options.mobile === true ? 390 : 1280;
+  windowObject.locationReloaded = false;
+
+  const originalWindowDispatchEvent = windowObject.dispatchEvent.bind(windowObject);
+  windowObject.dispatchEvent = (event: TestMessageEvent) => {
+    if (event.type === "message") {
+      dispatchedMessages.push(event.init.data);
+    }
+    return originalWindowDispatchEvent(event);
+  };
+
+  const context = vm.createContext({
+    window: windowObject,
+    document,
+    URL,
+    HTMLDivElement: TestHTMLDivElement,
+    HTMLLinkElement: TestHTMLLinkElement,
+    MutationObserver: TestMutationObserver,
+    MessageEvent: TestMessageEvent,
+    MouseEvent: TestMouseEvent,
+    Request: TestRequest,
+    Response: TestResponse,
+    WebSocket: TestWebSocket,
+    sessionStorage: {
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+      getItem: (key: string) => storage.get(key) ?? null,
+    },
+    Element: TestElement,
+    Object,
+    Array,
+    Map,
+    Set,
+    Math,
+    JSON,
+    Promise,
+    String,
+    Number,
+    Boolean,
+    encodeURIComponent,
+    decodeURIComponent,
+  });
+
+  return {
+    document,
+    windowObject,
+    timers,
+    fetchCalls,
+    dispatchedMessages,
+    replaceStateCalls,
+    run(script: string): void {
+      vm.runInContext(script, context);
+    },
+    getElectronBridge(): {
+      sendMessageFromView: (message: unknown) => Promise<void>;
+    } {
+      return Reflect.get(windowObject, "electronBridge") as {
+        sendMessageFromView: (message: unknown) => Promise<void>;
+      };
+    },
+    emitServerEnvelope(envelope: unknown): void {
+      const socket = TestWebSocket.latest;
+      if (!socket) {
+        throw new Error("No websocket connection was created.");
+      }
+      socket.emit("message", {
+        data: JSON.stringify(envelope),
+      });
+    },
+  };
+}
+
 describe("renderBootstrapScript", () => {
   it("serializes config safely into the inline bootstrap", () => {
     const script = renderBootstrapScript({
@@ -656,6 +1237,17 @@ describe("renderBootstrapScript", () => {
     windowObject.innerWidth = 390;
     windowObject.locationReloaded = false;
 
+    function updateLocation(url?: string | URL | null): void {
+      if (!url) {
+        return;
+      }
+
+      const nextUrl = new URL(String(url), windowObject.location.href);
+      windowObject.location.href = nextUrl.toString();
+      windowObject.location.protocol = nextUrl.protocol;
+      windowObject.location.host = nextUrl.host;
+    }
+
     const originalWindowDispatchEvent = windowObject.dispatchEvent.bind(windowObject);
     windowObject.dispatchEvent = (event: MessageEvent) => {
       if (event.type === "message") {
@@ -1164,6 +1756,397 @@ describe("renderBootstrapScript", () => {
       value: "newline",
       deleted: false,
     });
+  });
+
+  it("stores the active local thread in the thread query param", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&foo=bar",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "thread-role-request",
+      conversationId: "thr_123",
+    });
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.pathname).toBe("/");
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("foo")).toBe("bar");
+    expect(currentUrl.searchParams.get("thread")).toBe("thr_123");
+    expect(currentUrl.searchParams.get("initialRoute")).toBeNull();
+    expect(harness.replaceStateCalls).toHaveLength(1);
+  });
+
+  it("updates the thread query param for local navigate-to-route messages", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "navigate-to-route",
+        path: "/local/thr_456",
+      },
+    });
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.pathname).toBe("/");
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBe("thr_456");
+    expect(currentUrl.searchParams.get("initialRoute")).toBeNull();
+  });
+
+  it("clears the thread query param for new-chat messages", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "new-chat",
+      },
+    });
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBeNull();
+  });
+
+  it("keeps pending thread restores intact for home placeholder conversation ids", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "thread-role-request",
+      conversationId: "home:local:/root/repos/xigbclutchix/pocodex",
+    });
+
+    let currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBe("thr_123");
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "ready",
+    });
+    drainTestTimers(harness.timers);
+
+    currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.searchParams.get("thread")).toBe("thr_123");
+    expect(harness.dispatchedMessages).toContainEqual({
+      type: "navigate-to-route",
+      path: "/local/thr_123",
+    });
+    expect(harness.dispatchedMessages).toContainEqual({
+      type: "thread-stream-resume-request",
+      hostId: "local",
+      conversationId: "thr_123",
+    });
+  });
+
+  it("clears the thread query param when clicking a new-thread control", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+    });
+    const nav = harness.document.createElement("nav");
+    nav.setAttribute("role", "navigation");
+    const newThreadButton = harness.document.createElement("button");
+    newThreadButton.textContent = "New thread";
+    nav.appendChild(newThreadButton);
+    harness.document.body.appendChild(nav);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    harness.document.dispatchEvent(new TestMouseEvent("click", { target: newThreadButton }));
+    drainTestTimers(harness.timers);
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBeNull();
+  });
+
+  it("dispatches a single local-thread restore sequence after ready for a thread query param", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "ready",
+    });
+    drainTestTimers(harness.timers);
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "ready",
+    });
+    drainTestTimers(harness.timers);
+
+    const navigateMessages = harness.dispatchedMessages.filter(
+      (message) =>
+        JSON.stringify(message) ===
+        JSON.stringify({
+          type: "navigate-to-route",
+          path: "/local/thr_123",
+        }),
+    );
+    const resumeRequests = harness.dispatchedMessages.filter(
+      (message) =>
+        JSON.stringify(message) ===
+        JSON.stringify({
+          type: "thread-stream-resume-request",
+          hostId: "local",
+          conversationId: "thr_123",
+        }),
+    );
+
+    expect(navigateMessages).toHaveLength(1);
+    expect(resumeRequests).toHaveLength(1);
+  });
+
+  it("does not dispatch thread restore messages without a thread query param", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const cases = [
+      "http://127.0.0.1:8787/?token=secret",
+      "http://127.0.0.1:8787/?token=secret&thread=",
+      "http://127.0.0.1:8787/?token=secret&thread=home%3Alocal%3A%2Froot%2Frepos%2Fxigbclutchix%2Fpocodex",
+      "http://127.0.0.1:8787/?token=secret&initialRoute=%2Fremote%2Ftask-1",
+    ];
+
+    for (const href of cases) {
+      const harness = createBootstrapHarness({ href });
+      harness.run(script);
+      await flushBootstrapMicrotasks();
+
+      await harness.getElectronBridge().sendMessageFromView({
+        type: "ready",
+      });
+      drainTestTimers(harness.timers);
+
+      expect(
+        harness.dispatchedMessages.some(
+          (message) =>
+            typeof message === "object" &&
+            message !== null &&
+            "type" in message &&
+            ((message as { type?: unknown }).type === "thread-stream-resume-request" ||
+              (message as { type?: unknown }).type === "navigate-to-route"),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it("clears the thread query param for non-local navigate-to-route messages", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "navigate-to-route",
+        path: "/settings",
+      },
+    });
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBeNull();
+  });
+
+  it("avoids duplicate history writes for repeated active-thread sync messages", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "thread-role-request",
+      conversationId: "thr_123",
+    });
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "thread-role-request",
+      conversationId: "thr_123",
+    });
+
+    expect(harness.replaceStateCalls).toHaveLength(1);
+  });
+
+  it("migrates legacy initialRoute thread urls onto the thread query param", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&initialRoute=%2Flocal%2Fthr_legacy",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.pathname).toBe("/");
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBe("thr_legacy");
+    expect(currentUrl.searchParams.get("initialRoute")).toBeNull();
+  });
+
+  it("preserves non-local legacy initialRoute urls during normalization", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&initialRoute=%2Fremote%2Ftask-1",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.pathname).toBe("/");
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBeNull();
+    expect(currentUrl.searchParams.get("initialRoute")).toBe("/remote/task-1");
+    expect(harness.replaceStateCalls).toHaveLength(0);
+  });
+
+  it("drops invalid thread params without deleting non-local initialRoute urls", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=home%3Alocal%3A%2Froot%2Frepos%2Fxigbclutchix%2Fpocodex&initialRoute=%2Fremote%2Ftask-1",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.pathname).toBe("/");
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBeNull();
+    expect(currentUrl.searchParams.get("initialRoute")).toBe("/remote/task-1");
+    expect(harness.replaceStateCalls).toHaveLength(1);
   });
 
   it("includes home-directory path shortening in the import dialog bootstrap", () => {
