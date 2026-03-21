@@ -50,6 +50,7 @@ class TestElement extends TestEventTargetLike {
   href = "";
   textContent = "";
   type = "";
+  multiple = false;
   value = "";
   placeholder = "";
   disabled = false;
@@ -120,6 +121,10 @@ class TestElement extends TestEventTargetLike {
     siblings.splice(index + 1, 0, node);
   }
 
+  click(): void {
+    this.dispatchEvent({ type: "click" });
+  }
+
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
     if (name === "id") {
@@ -133,6 +138,12 @@ class TestElement extends TestEventTargetLike {
     }
     if (name === "rel") {
       this.rel = value;
+    }
+    if (name === "type") {
+      this.type = value;
+    }
+    if (name === "multiple") {
+      this.multiple = true;
     }
     if (name.startsWith("data-")) {
       const datasetKey = name
@@ -329,6 +340,8 @@ class TestMouseEvent {
   readonly altKey: boolean;
   readonly shiftKey: boolean;
   defaultPrevented = false;
+  propagationStopped = false;
+  immediatePropagationStopped = false;
 
   constructor(
     readonly type: string,
@@ -351,6 +364,15 @@ class TestMouseEvent {
 
   preventDefault(): void {
     this.defaultPrevented = true;
+  }
+
+  stopPropagation(): void {
+    this.propagationStopped = true;
+  }
+
+  stopImmediatePropagation(): void {
+    this.immediatePropagationStopped = true;
+    this.propagationStopped = true;
   }
 }
 
@@ -983,6 +1005,74 @@ describe("renderBootstrapScript", () => {
         credentials: "same-origin",
       },
     });
+  });
+
+  it("handles Add photos & files menu clicks locally by clicking the browser file input", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness();
+    harness.run(script);
+
+    const input = harness.document.createElement("input");
+    input.setAttribute("type", "file");
+    input.setAttribute("multiple", "");
+
+    let clickCount = 0;
+    input.addEventListener("click", () => {
+      clickCount += 1;
+    });
+
+    const menuItem = harness.document.createElement("div");
+    menuItem.setAttribute("role", "menuitem");
+    menuItem.textContent = "Add photos & files";
+    const label = harness.document.createElement("span");
+    menuItem.appendChild(label);
+
+    harness.document.body.appendChild(input);
+    harness.document.body.appendChild(menuItem);
+
+    const event = new TestMouseEvent("click", { target: label });
+    harness.document.dispatchEvent(event);
+
+    expect(clickCount).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+    expect(event.immediatePropagationStopped).toBe(true);
+  });
+
+  it("does not intercept Add photos & files menu clicks when the browser file input is missing", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness();
+    harness.run(script);
+
+    const menuItem = harness.document.createElement("div");
+    menuItem.setAttribute("role", "menuitem");
+    menuItem.textContent = "Add photos & files";
+    const label = harness.document.createElement("span");
+    menuItem.appendChild(label);
+    harness.document.body.appendChild(menuItem);
+
+    const event = new TestMouseEvent("click", { target: label });
+    harness.document.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(event.immediatePropagationStopped).toBe(false);
   });
 
   it("closes the mobile sidebar after clicking thread and new-thread navigation in the sidebar", () => {

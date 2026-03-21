@@ -134,6 +134,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     ensureHostAttached(workspaceRootPickerHost);
     startOpenInAppObserver();
     installNewThreadNavigationSync();
+    installLocalAttachmentPickerInterception();
     installMobileSidebarThreadNavigationClose();
     installSidebarModePersistence();
   });
@@ -280,6 +281,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     document.addEventListener("click", handleNewThreadTriggerClick, true);
   }
 
+  function installLocalAttachmentPickerInterception(): void {
+    document.addEventListener("click", handleLocalAttachmentPickerClick, true);
+  }
+
   function handleSidebarClick(event: MouseEvent): void {
     if (!isPrimaryUnmodifiedClick(event)) {
       return;
@@ -325,6 +330,31 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     clearThreadQuery();
+  }
+
+  function handleLocalAttachmentPickerClick(event: MouseEvent): void {
+    if (!isPrimaryUnmodifiedClick(event)) {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+
+    const nearestMenuItem = target.closest('[role="menuitem"]');
+    if (!nearestMenuItem || !isAddPhotosAndFilesMenuItem(nearestMenuItem)) {
+      return;
+    }
+
+    const pickerResult = tryOpenComposerFileInput();
+    if (!pickerResult.ok) {
+      return;
+    }
+
+    event.preventDefault();
+    stopEventPropagation(event);
+    closeTransientMenus();
   }
 
   function handleMobileSidebarThreadClick(event: MouseEvent): void {
@@ -401,6 +431,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
     const text = element.textContent?.trim().toLowerCase() ?? "";
     return text === "new thread";
+  }
+
+  function isAddPhotosAndFilesMenuItem(element: Element): boolean {
+    if (element.getAttribute("role") !== "menuitem") {
+      return false;
+    }
+
+    return element.textContent?.trim().toLowerCase() === "add photos & files";
   }
 
   function handleMobileContentPaneClick(event: MouseEvent): void {
@@ -1259,6 +1297,75 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     return payload.result;
+  }
+
+  function findComposerFileInput(): {
+    click: () => void;
+    getAttribute(name: string): string | null;
+    multiple?: boolean;
+    type?: string;
+  } | null {
+    const candidate = document.querySelector('input[type="file"]');
+    if (!isRecord(candidate) || typeof candidate.click !== "function") {
+      return null;
+    }
+
+    const click = candidate.click;
+    const getAttribute =
+      typeof candidate.getAttribute === "function"
+        ? candidate.getAttribute.bind(candidate)
+        : (_name: string) => null;
+    const type = typeof candidate.type === "string" ? candidate.type : getAttribute("type");
+    const isMultiple = candidate.multiple === true || getAttribute("multiple") !== null;
+    if (type !== "file" || !isMultiple) {
+      return null;
+    }
+
+    return {
+      click: () => {
+        click.call(candidate);
+      },
+      getAttribute,
+      multiple: candidate.multiple === true,
+      type: type ?? undefined,
+    };
+  }
+
+  function tryOpenComposerFileInput(): { ok: true } | { ok: false; error: string } {
+    const fileInput = findComposerFileInput();
+    if (!fileInput) {
+      return {
+        ok: false,
+        error: "Unable to locate browser file input.",
+      };
+    }
+
+    fileInput.click();
+    return { ok: true };
+  }
+
+  function stopEventPropagation(event: unknown): void {
+    if (isRecord(event) && typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+      return;
+    }
+
+    if (isRecord(event) && typeof event.stopPropagation === "function") {
+      event.stopPropagation();
+    }
+  }
+
+  function closeTransientMenus(): void {
+    if (typeof KeyboardEvent !== "function") {
+      return;
+    }
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+      }),
+    );
   }
 
   function isWorkspaceRootPickerListResult(value: unknown): value is WorkspaceRootPickerListResult {
