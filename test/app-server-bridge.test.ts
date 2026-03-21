@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -354,7 +354,7 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
-  it("publishes shared object updates and workspace bootstrap responses", async () => {
+  it("publishes shared object updates and opens the onboarding workspace picker", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -408,8 +408,9 @@ describe("AppServerBridge", () => {
     });
 
     expect(emittedMessages).toContainEqual({
-      type: "electron-onboarding-pick-workspace-or-create-default-result",
-      success: true,
+      type: "pocodex-open-workspace-root-picker",
+      context: "onboarding",
+      initialPath: homedir(),
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-1")).toEqual({
@@ -621,7 +622,7 @@ describe("AppServerBridge", () => {
     );
   });
 
-  it("opens the desktop import dialog for add-project host actions", async () => {
+  it("opens the workspace root picker for add-project host actions", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -632,9 +633,55 @@ describe("AppServerBridge", () => {
       type: "electron-add-new-workspace-root-option",
     });
 
+    await bridge.forwardBridgeMessage({
+      type: "electron-pick-workspace-root-option",
+    });
+
     expect(emittedMessages).toContainEqual({
-      type: "pocodex-open-desktop-import-dialog",
-      mode: "manual",
+      type: "pocodex-open-workspace-root-picker",
+      context: "manual",
+      initialPath: homedir(),
+    });
+    expect(
+      emittedMessages.filter(
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: unknown }).type === "pocodex-open-workspace-root-picker",
+      ),
+    ).toHaveLength(2);
+
+    await bridge.close();
+  });
+
+  it("opens the workspace root picker when add-workspace-root-option is missing a root", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-add-root-missing",
+      method: "POST",
+      url: "vscode://codex/add-workspace-root-option",
+      body: JSON.stringify({}),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-add-root-missing")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-add-root-missing")).toEqual({
+      success: false,
+      root: "",
+    });
+    expect(emittedMessages).toContainEqual({
+      type: "pocodex-open-workspace-root-picker",
+      context: "manual",
+      initialPath: homedir(),
     });
 
     await bridge.close();
@@ -948,52 +995,56 @@ describe("AppServerBridge", () => {
     await secondBridge.close();
   });
 
-  it("lists Codex desktop projects for import through IPC", async () => {
-    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-desktop-import-"));
+  it("lists workspace root picker directories and defaults to the host home directory", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
     tempDirs.push(tempDirectory);
-    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
-    const importedProjectRoot = join(tempDirectory, "imported-project");
-    const codexDesktopGlobalStatePath = await writeDesktopGlobalState(tempDirectory, {
-      roots: [TEST_WORKSPACE_ROOT, importedProjectRoot],
-      activeRoots: [importedProjectRoot],
-      labels: {
-        [importedProjectRoot]: "Imported Project",
-      },
-    });
+    await mkdir(join(tempDirectory, "beta"), { recursive: true });
+    await mkdir(join(tempDirectory, "Alpha"), { recursive: true });
+    await writeFile(join(tempDirectory, "README.md"), "fixture\n", "utf8");
 
-    const bridge = await createBridge(children, {
-      workspaceRootRegistryPath,
-      codexDesktopGlobalStatePath,
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-home",
+        method: "workspace-root-picker/list",
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-home",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: homedir(),
+        parentPath: dirname(homedir()) === homedir() ? null : dirname(homedir()),
+        homePath: homedir(),
+        entries: expect.any(Array),
+      },
     });
 
     await expect(
       bridge.handleIpcRequest({
-        requestId: "ipc-1",
-        method: "desktop-workspace-import/list",
+        requestId: "ipc-list",
+        method: "workspace-root-picker/list",
+        params: {
+          path: tempDirectory,
+        },
       }),
     ).resolves.toEqual({
-      requestId: "ipc-1",
+      requestId: "ipc-list",
       type: "response",
       resultType: "success",
       result: {
-        found: true,
-        path: codexDesktopGlobalStatePath,
-        promptSeen: false,
-        shouldPrompt: true,
-        projects: [
+        currentPath: tempDirectory,
+        parentPath: dirname(tempDirectory),
+        homePath: homedir(),
+        entries: [
           {
-            root: TEST_WORKSPACE_ROOT,
-            label: "pocodex",
-            activeInCodex: false,
-            alreadyImported: false,
-            available: true,
+            name: "Alpha",
+            path: join(tempDirectory, "Alpha"),
           },
           {
-            root: importedProjectRoot,
-            label: "Imported Project",
-            activeInCodex: true,
-            alreadyImported: false,
-            available: true,
+            name: "beta",
+            path: join(tempDirectory, "beta"),
           },
         ],
       },
@@ -1002,22 +1053,151 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
-  it("imports selected Codex desktop projects and persists prompt dismissal", async () => {
-    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-desktop-import-"));
+  it("rejects invalid workspace root picker paths", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
     tempDirs.push(tempDirectory);
-    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
-    const importedProjectRoot = join(tempDirectory, "imported-project");
-    const codexDesktopGlobalStatePath = await writeDesktopGlobalState(tempDirectory, {
-      roots: [TEST_WORKSPACE_ROOT, importedProjectRoot],
-      activeRoots: [importedProjectRoot],
-      labels: {
-        [importedProjectRoot]: "Imported Project",
+    const filePath = join(tempDirectory, "file.txt");
+    await writeFile(filePath, "fixture\n", "utf8");
+
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-relative",
+        method: "workspace-root-picker/list",
+        params: {
+          path: "relative/path",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-relative",
+      type: "response",
+      resultType: "error",
+      error: "Folder path must be absolute.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-file",
+        method: "workspace-root-picker/list",
+        params: {
+          path: filePath,
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-file",
+      type: "response",
+      resultType: "error",
+      error: "Choose an existing folder.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-root",
+        method: "workspace-root-picker/list",
+        params: {
+          path: "/",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-root",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: "/",
+        parentPath: null,
+        homePath: homedir(),
+        entries: expect.any(Array),
       },
     });
 
+    await bridge.close();
+  });
+
+  it("creates workspace root picker directories and rejects invalid names", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "new-project",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: join(tempDirectory, "new-project"),
+      },
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create-empty",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "  ",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create-empty",
+      type: "response",
+      resultType: "error",
+      error: "Folder name cannot be empty.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create-invalid",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "nested/path",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create-invalid",
+      type: "response",
+      resultType: "error",
+      error: "Folder name cannot contain path separators.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create-existing",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "new-project",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create-existing",
+      type: "response",
+      resultType: "error",
+      error: "That folder already exists.",
+    });
+
+    await bridge.close();
+  });
+
+  it("confirms new workspace root picker selections, persists them, and emits updates", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectRoot = join(tempDirectory, "project-alpha");
+    await mkdir(projectRoot, { recursive: true });
+
     const bridge = await createBridge(children, {
       workspaceRootRegistryPath,
-      codexDesktopGlobalStatePath,
     });
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -1026,20 +1206,20 @@ describe("AppServerBridge", () => {
 
     await expect(
       bridge.handleIpcRequest({
-        requestId: "ipc-apply",
-        method: "desktop-workspace-import/apply",
+        requestId: "ipc-confirm",
+        method: "workspace-root-picker/confirm",
         params: {
-          roots: [importedProjectRoot],
+          path: projectRoot,
+          context: "manual",
         },
       }),
     ).resolves.toEqual({
-      requestId: "ipc-apply",
+      requestId: "ipc-confirm",
       type: "response",
       resultType: "success",
       result: {
-        importedRoots: [importedProjectRoot],
-        skippedRoots: [],
-        promptSeen: true,
+        action: "added",
+        root: projectRoot,
       },
     });
 
@@ -1049,43 +1229,168 @@ describe("AppServerBridge", () => {
     expect(emittedMessages).toContainEqual({
       type: "active-workspace-roots-updated",
     });
-
     await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
-      '"desktopImportPromptSeen": true',
+      `"activeRoot": "${projectRoot}"`,
     );
+
+    await bridge.close();
+  });
+
+  it("activates existing workspace root picker selections without duplicating roots", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const alphaRoot = join(tempDirectory, "alpha");
+    const betaRoot = join(tempDirectory, "beta");
+    await mkdir(alphaRoot, { recursive: true });
+    await mkdir(betaRoot, { recursive: true });
+    const workspaceRootRegistryPath = await writeWorkspaceRootRegistry(tempDirectory, {
+      roots: [alphaRoot, betaRoot],
+      activeRoot: betaRoot,
+    });
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
 
     await expect(
       bridge.handleIpcRequest({
-        requestId: "ipc-list",
-        method: "desktop-workspace-import/list",
+        requestId: "ipc-confirm-existing",
+        method: "workspace-root-picker/confirm",
+        params: {
+          path: alphaRoot,
+          context: "manual",
+        },
       }),
     ).resolves.toEqual({
-      requestId: "ipc-list",
+      requestId: "ipc-confirm-existing",
       type: "response",
       resultType: "success",
       result: {
-        found: true,
-        path: codexDesktopGlobalStatePath,
-        promptSeen: true,
-        shouldPrompt: false,
-        projects: [
-          {
-            root: TEST_WORKSPACE_ROOT,
-            label: "pocodex",
-            activeInCodex: false,
-            alreadyImported: false,
-            available: true,
-          },
-          {
-            root: importedProjectRoot,
-            label: "Imported Project",
-            activeInCodex: true,
-            alreadyImported: true,
-            available: true,
-          },
-        ],
+        action: "activated",
+        root: alphaRoot,
       },
     });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-active-roots-after-confirm",
+      method: "POST",
+      url: "vscode://codex/active-workspace-roots",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-active-roots-after-confirm")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-active-roots-after-confirm")).toEqual({
+      roots: [alphaRoot, betaRoot],
+    });
+    await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
+      `"activeRoot": "${alphaRoot}"`,
+    );
+
+    await bridge.close();
+  });
+
+  it("emits onboarding success and failure for workspace root picker confirm and cancel", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectRoot = join(tempDirectory, "project-onboarding");
+    await mkdir(projectRoot, { recursive: true });
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-confirm-onboarding",
+        method: "workspace-root-picker/confirm",
+        params: {
+          path: projectRoot,
+          context: "onboarding",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-confirm-onboarding",
+      type: "response",
+      resultType: "success",
+      result: {
+        action: "added",
+        root: projectRoot,
+      },
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "electron-onboarding-pick-workspace-or-create-default-result",
+      success: true,
+    });
+
+    emittedMessages.length = 0;
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-cancel-onboarding",
+        method: "workspace-root-picker/cancel",
+        params: {
+          context: "onboarding",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-cancel-onboarding",
+      type: "response",
+      resultType: "success",
+      result: {
+        cancelled: true,
+      },
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "electron-onboarding-pick-workspace-or-create-default-result",
+      success: false,
+    });
+
+    await bridge.close();
+  });
+
+  it("supports workspace-root-option-picked as a compatibility path", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectRoot = join(tempDirectory, "project-picked");
+    await mkdir(projectRoot, { recursive: true });
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "workspace-root-option-picked",
+      root: projectRoot,
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "workspace-root-options-updated",
+    });
+    expect(emittedMessages).toContainEqual({
+      type: "active-workspace-roots-updated",
+    });
+    await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
+      `"activeRoot": "${projectRoot}"`,
+    );
 
     await bridge.close();
   });
@@ -2141,7 +2446,6 @@ describe("AppServerBridge", () => {
 async function createBridge(
   children: MockChildProcess[],
   options: {
-    codexDesktopGlobalStatePath?: string;
     persistedAtomRegistryPath?: string;
     workspaceRootRegistryPath?: string;
     gitWorkerBridge?: FakeGitWorkerBridge;
@@ -2171,7 +2475,6 @@ async function createBridge(
     appPath: "/Applications/Codex.app",
     codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
-    codexDesktopGlobalStatePath: options.codexDesktopGlobalStatePath,
     persistedAtomRegistryPath: options.persistedAtomRegistryPath,
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,
@@ -2227,37 +2530,6 @@ function buildMockLocalRequestResponse(method: string): {
     default:
       return null;
   }
-}
-
-async function writeDesktopGlobalState(
-  tempDirectory: string,
-  state: {
-    roots: string[];
-    activeRoots?: string[];
-    labels?: Record<string, string>;
-  },
-): Promise<string> {
-  const statePath = join(tempDirectory, ".codex-global-state.json");
-
-  for (const root of state.roots) {
-    await mkdir(root, { recursive: true });
-  }
-
-  await writeFile(
-    statePath,
-    `${JSON.stringify(
-      {
-        "electron-saved-workspace-roots": state.roots,
-        "active-workspace-roots": state.activeRoots ?? [],
-        "electron-workspace-root-labels": state.labels ?? {},
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
-  );
-
-  return statePath;
 }
 
 async function writeCodexAuthFile(

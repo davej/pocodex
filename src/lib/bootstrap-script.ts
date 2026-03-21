@@ -22,23 +22,33 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   type ConnectionPhase = "connected" | "degraded" | "reconnecting" | "reload-required";
 
-  type DesktopImportMode = "first-run" | "manual";
   type SidebarMode = "expanded" | "collapsed";
+  type WorkspaceRootPickerContext = "manual" | "onboarding";
 
-  type DesktopImportProject = {
-    root: string;
-    label: string;
-    activeInCodex: boolean;
-    alreadyImported: boolean;
-    available: boolean;
+  type WorkspaceRootPickerEntry = {
+    name: string;
+    path: string;
   };
 
-  type DesktopImportListResult = {
-    found: boolean;
-    path: string;
-    promptSeen: boolean;
-    shouldPrompt: boolean;
-    projects: DesktopImportProject[];
+  type WorkspaceRootPickerListResult = {
+    currentPath: string;
+    parentPath: string | null;
+    homePath: string;
+    entries: WorkspaceRootPickerEntry[];
+  };
+
+  type WorkspaceRootPickerState = {
+    context: WorkspaceRootPickerContext;
+    currentPath: string;
+    parentPath: string | null;
+    entries: WorkspaceRootPickerEntry[];
+    pathInputValue: string;
+    errorMessage: string | null;
+    hasOpenedPath: boolean;
+    isLoading: boolean;
+    isCreatingDirectory: boolean;
+    isCancelling: boolean;
+    isConfirming: boolean;
   };
 
   type SessionValidationResult =
@@ -83,16 +93,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   const pendingMessages: string[] = [];
   const toastHost = document.createElement("div");
   const statusHost = document.createElement("div");
-  const importHost = document.createElement("div");
+  const workspaceRootPickerHost = document.createElement("div");
 
   let socket: WebSocket | null = null;
   let isConnecting = false;
   let reconnectAttempt = 0;
   let isClosing = false;
   let isOpenInAppObserverStarted = false;
-  let isImportUiObserverStarted = false;
   let hasConnected = false;
-  let hasAttemptedDesktopImportPrompt = false;
   let nextIpcRequestId = 0;
   let connectionPhase: ConnectionPhase = "reconnecting";
   let reconnectTimer: number | null = null;
@@ -110,11 +118,12 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   let sidebarModeInteractionTimer: number | null = null;
   let pendingSidebarModeTarget: SidebarMode | null = null;
   let pendingSidebarModeTargetUntil = 0;
+  let workspaceRootPickerState: WorkspaceRootPickerState | null = null;
 
   toastHost.id = "pocodex-toast-host";
   statusHost.id = "pocodex-status-host";
-  importHost.id = "pocodex-import-host";
-  importHost.hidden = true;
+  workspaceRootPickerHost.id = "pocodex-workspace-root-picker-host";
+  workspaceRootPickerHost.hidden = true;
   document.documentElement.dataset.pocodex = "true";
   normalizeBrowserUrlForRefresh();
 
@@ -122,9 +131,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     ensureStylesheetLink(config.stylesheetHref);
     ensureHostAttached(toastHost);
     ensureHostAttached(statusHost);
-    ensureHostAttached(importHost);
+    ensureHostAttached(workspaceRootPickerHost);
     startOpenInAppObserver();
-    startImportUiObserver();
     installNewThreadNavigationSync();
     installMobileSidebarThreadNavigationClose();
     installSidebarModePersistence();
@@ -764,328 +772,467 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  function startImportUiObserver(): void {
-    if (isImportUiObserverStarted || !document.body) {
-      return;
-    }
-
-    isImportUiObserverStarted = true;
-    refreshImportUi(document);
-
-    const observer = new MutationObserver(() => {
-      refreshImportUi(document);
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
+  async function openWorkspaceRootPicker(
+    context: WorkspaceRootPickerContext,
+    initialPath: string,
+  ): Promise<void> {
+    workspaceRootPickerState = {
+      context,
+      currentPath: initialPath,
+      parentPath: null,
+      entries: [],
+      pathInputValue: initialPath,
+      errorMessage: null,
+      hasOpenedPath: false,
+      isLoading: true,
+      isCreatingDirectory: false,
+      isCancelling: false,
+      isConfirming: false,
+    };
+    renderWorkspaceRootPicker();
+    await loadWorkspaceRootPickerPath(initialPath);
   }
 
-  function refreshImportUi(root: Document | Element = document): void {
-    root.querySelectorAll('[role="menu"]').forEach((candidate) => {
-      if (!(candidate instanceof Element)) {
-        return;
-      }
-      maybeInjectSettingsMenuImportItem(candidate);
-    });
+  function closeWorkspaceRootPicker(): void {
+    workspaceRootPickerState = null;
+    workspaceRootPickerHost.hidden = true;
+    workspaceRootPickerHost.replaceChildren();
   }
 
-  function maybeInjectSettingsMenuImportItem(menu: Element): void {
-    if (!looksLikeSettingsMenu(menu)) {
+  function renderWorkspaceRootPicker(): void {
+    const state = workspaceRootPickerState;
+    if (!state) {
+      closeWorkspaceRootPicker();
       return;
     }
 
-    if (menu.querySelector('[data-pocodex-import-menu-item="true"]')) {
-      return;
-    }
+    ensureHostAttached(workspaceRootPickerHost);
+    workspaceRootPickerHost.hidden = false;
+    workspaceRootPickerHost.replaceChildren();
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.role = "menuitem";
-    button.dataset.pocodexImportMenuItem = "true";
-    const label = document.createElement("span");
-    label.dataset.pocodexImportMenuLabel = "true";
-    label.textContent = "Import from Codex.app";
-    button.append(createImportMenuItemIcon(), label);
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void openDesktopImportDialog("manual");
-    });
-
-    const separator = document.createElement("div");
-    separator.role = "separator";
-    separator.dataset.pocodexImportMenuSeparator = "true";
-
-    menu.append(separator, button);
-  }
-
-  function createImportMenuItemIcon(): HTMLSpanElement {
-    const icon = document.createElement("span");
-    icon.dataset.pocodexImportMenuIcon = "true";
-    if (config.importIconSvg) {
-      icon.innerHTML = config.importIconSvg.trim();
-    }
-    return icon;
-  }
-
-  function looksLikeSettingsMenu(menu: Element): boolean {
-    let hasSettingsItem = false;
-    let hasLogOutItem = false;
-
-    menu.querySelectorAll('[role="menuitem"]').forEach((item) => {
-      if (!(item instanceof Element)) {
-        return;
-      }
-
-      const text = item.textContent?.trim().toLowerCase() ?? "";
-      if (text === "settings") {
-        hasSettingsItem = true;
-      }
-      if (text === "log out") {
-        hasLogOutItem = true;
-      }
-    });
-
-    return hasSettingsItem && hasLogOutItem;
-  }
-
-  async function maybePromptForDesktopImport(): Promise<void> {
-    if (hasAttemptedDesktopImportPrompt) {
-      return;
-    }
-
-    hasAttemptedDesktopImportPrompt = true;
-    await openDesktopImportDialog("first-run");
-  }
-
-  async function openDesktopImportDialog(mode: DesktopImportMode): Promise<void> {
-    const result = await listDesktopImportProjects();
-    if (!result) {
-      return;
-    }
-
-    const importableProjects = result.projects.filter(
-      (project) => project.available && !project.alreadyImported,
-    );
-    if (mode === "first-run" && !result.shouldPrompt) {
-      return;
-    }
-
-    if (!result.found) {
-      if (mode === "manual") {
-        showNotice("Codex.app project state was not found.");
-      }
-      return;
-    }
-
-    if (importableProjects.length === 0) {
-      if (mode === "manual") {
-        showNotice("No additional Codex.app projects are available to import.");
-      }
-      return;
-    }
-
-    renderDesktopImportDialog(result, mode);
-  }
-
-  function renderDesktopImportDialog(
-    result: DesktopImportListResult,
-    mode: DesktopImportMode,
-  ): void {
-    ensureHostAttached(importHost);
-    importHost.hidden = false;
-    importHost.replaceChildren();
-
-    const importableRoots = new Set(
-      result.projects
-        .filter((project) => project.available && !project.alreadyImported)
-        .map((project) => project.root),
-    );
-
+    const isBusy =
+      state.isLoading || state.isCreatingDirectory || state.isCancelling || state.isConfirming;
+    const canCloseOnboarding = state.context !== "onboarding" || state.hasOpenedPath;
     const backdrop = document.createElement("div");
-    backdrop.dataset.pocodexImportBackdrop = "true";
+    backdrop.dataset.pocodexWorkspaceRootPickerBackdrop = "true";
 
     const dialog = document.createElement("section");
-    dialog.dataset.pocodexImportDialog = "true";
+    dialog.dataset.pocodexWorkspaceRootPickerDialog = "true";
 
     const header = document.createElement("div");
-    header.dataset.pocodexImportHeader = "true";
+    header.dataset.pocodexWorkspaceRootPickerHeader = "true";
 
     const title = document.createElement("h2");
-    title.textContent = "Import projects from Codex.app";
+    title.textContent =
+      state.context === "onboarding" ? "Choose a project folder" : "Add a project folder";
 
     const subtitle = document.createElement("p");
     subtitle.textContent =
-      mode === "first-run"
-        ? "Choose which saved Codex.app projects you want to add to Pocodex."
-        : "Select any additional Codex.app projects you want to bring into Pocodex.";
+      state.context === "onboarding"
+        ? "Choose or create a folder on the Pocodex host to start working locally."
+        : "Choose or create a folder on the Pocodex host to add it as a project.";
 
     header.append(title, subtitle);
 
-    const list = document.createElement("div");
-    list.dataset.pocodexImportList = "true";
+    const pathForm = document.createElement("div");
+    pathForm.dataset.pocodexWorkspaceRootPickerPathForm = "true";
 
-    const selectedRoots = new Set<string>();
-    const sortedProjects = [...result.projects].sort((left, right) => {
-      if (left.activeInCodex !== right.activeInCodex) {
-        return left.activeInCodex ? -1 : 1;
-      }
-      return left.label.localeCompare(right.label);
+    const pathLabel = document.createElement("label");
+    pathLabel.dataset.pocodexWorkspaceRootPickerPathLabel = "true";
+    pathLabel.textContent = "Folder path";
+
+    const pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.value = state.pathInputValue;
+    pathInput.placeholder = "~/project";
+    pathInput.disabled = isBusy;
+    pathInput.dataset.pocodexWorkspaceRootPickerPathInput = "true";
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.dataset.pocodexWorkspaceRootPickerOpenButton = "true";
+    openButton.textContent = state.isLoading ? "Loading..." : "Open";
+    openButton.addEventListener("click", () => {
+      void submitWorkspaceRootPickerPathInput();
     });
 
-    for (const project of sortedProjects) {
-      const row = document.createElement("label");
-      row.dataset.pocodexImportRow = "true";
+    const newFolderButton = document.createElement("button");
+    newFolderButton.type = "button";
+    newFolderButton.dataset.pocodexWorkspaceRootPickerNewFolderButton = "true";
+    newFolderButton.textContent = state.isCreatingDirectory ? "Creating..." : "New folder";
+    newFolderButton.disabled =
+      isBusy || !canCreateWorkspaceRootPickerDirectory(state.pathInputValue, state.currentPath);
+    newFolderButton.addEventListener("click", () => {
+      void createWorkspaceRootPickerDirectory();
+    });
 
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = project.root;
-      checkbox.disabled = !importableRoots.has(project.root);
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) {
-          selectedRoots.add(project.root);
-        } else {
-          selectedRoots.delete(project.root);
-        }
-        importButton.disabled = selectedRoots.size === 0;
-      });
+    const syncPathActionButtons = (): void => {
+      const currentState = workspaceRootPickerState ?? state;
+      openButton.disabled = isBusy || currentState.pathInputValue.trim().length === 0;
+      newFolderButton.disabled =
+        isBusy ||
+        !canCreateWorkspaceRootPickerDirectory(
+          currentState.pathInputValue,
+          currentState.currentPath,
+        );
+    };
 
-      const details = document.createElement("div");
-      details.dataset.pocodexImportDetails = "true";
-
-      const label = document.createElement("strong");
-      label.textContent = project.label;
-
-      const root = document.createElement("code");
-      root.textContent = formatDesktopImportPath(project.root);
-
-      details.append(label, root);
-
-      const badges = document.createElement("div");
-      badges.dataset.pocodexImportBadges = "true";
-      if (project.activeInCodex) {
-        badges.appendChild(createDesktopImportBadge("Active in Codex.app"));
+    pathInput.addEventListener("input", () => {
+      if (!workspaceRootPickerState) {
+        return;
       }
-      if (project.alreadyImported) {
-        badges.appendChild(createDesktopImportBadge("Already in Pocodex"));
-      } else if (!project.available) {
-        badges.appendChild(createDesktopImportBadge("Missing on disk"));
+      workspaceRootPickerState.pathInputValue = pathInput.value;
+      syncPathActionButtons();
+    });
+    pathInput.addEventListener("keydown", (event) => {
+      if (readEventKey(event) !== "Enter") {
+        return;
       }
+      event.preventDefault();
+      void submitWorkspaceRootPickerPathInput();
+    });
+    syncPathActionButtons();
 
-      row.append(checkbox, details);
-      if (badges.childNodes.length > 0) {
-        row.appendChild(badges);
-      }
-      list.appendChild(row);
+    pathLabel.appendChild(pathInput);
+    pathForm.append(pathLabel, openButton, newFolderButton);
+
+    const content = document.createElement("div");
+    content.dataset.pocodexWorkspaceRootPickerContent = "true";
+
+    if (state.errorMessage) {
+      const errorText = document.createElement("p");
+      errorText.dataset.pocodexWorkspaceRootPickerError = "true";
+      errorText.textContent = state.errorMessage;
+      content.appendChild(errorText);
     }
 
-    const actions = document.createElement("div");
-    actions.dataset.pocodexImportActions = "true";
+    const list = document.createElement("div");
+    list.dataset.pocodexWorkspaceRootPickerList = "true";
+    if (state.isLoading) {
+      const loading = document.createElement("p");
+      loading.dataset.pocodexWorkspaceRootPickerEmpty = "true";
+      loading.textContent = "Loading folders...";
+      list.appendChild(loading);
+    } else {
+      const rows: Array<{
+        label: string;
+        path: string;
+        isParent?: boolean;
+      }> = [];
+      if (state.parentPath) {
+        rows.push({
+          label: "..",
+          path: state.parentPath,
+          isParent: true,
+        });
+      }
+      for (const entry of state.entries) {
+        rows.push({
+          label: entry.name,
+          path: entry.path,
+        });
+      }
+
+      if (rows.length === 0) {
+        const empty = document.createElement("p");
+        empty.dataset.pocodexWorkspaceRootPickerEmpty = "true";
+        empty.textContent = "This folder is empty.";
+        list.appendChild(empty);
+      }
+
+      for (const rowConfig of rows) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.dataset.pocodexWorkspaceRootPickerRow = "true";
+        if (rowConfig.isParent) {
+          row.dataset.pocodexWorkspaceRootPickerParentRow = "true";
+        }
+        row.textContent = rowConfig.label;
+        row.disabled = isBusy;
+        row.addEventListener("click", () => {
+          void loadWorkspaceRootPickerPath(rowConfig.path);
+        });
+        list.appendChild(row);
+      }
+    }
+    content.appendChild(list);
+
+    const footer = document.createElement("div");
+    footer.dataset.pocodexWorkspaceRootPickerFooter = "true";
 
     const cancelButton = document.createElement("button");
     cancelButton.type = "button";
-    cancelButton.textContent = mode === "first-run" ? "Skip for now" : "Cancel";
+    cancelButton.dataset.pocodexWorkspaceRootPickerCancelButton = "true";
+    cancelButton.textContent = state.isCancelling ? "Cancelling..." : "Cancel";
+    cancelButton.disabled = isBusy || !canCloseOnboarding;
     cancelButton.addEventListener("click", () => {
-      closeDesktopImportDialog(mode === "first-run");
+      void cancelWorkspaceRootPicker();
     });
 
-    const importButton = document.createElement("button");
-    importButton.type = "button";
-    importButton.dataset.variant = "primary";
-    importButton.disabled = true;
-    importButton.textContent = "Import selected";
-    importButton.addEventListener("click", async () => {
-      const roots = [...selectedRoots];
-      if (roots.length === 0) {
-        return;
-      }
-
-      importButton.disabled = true;
-      cancelButton.disabled = true;
-      importButton.textContent = "Importing...";
-
-      try {
-        const result = await callPocodexIpc("desktop-workspace-import/apply", {
-          roots,
-        });
-        const importedRoots = getImportedRoots(result);
-        closeDesktopImportDialog(false);
-        if (importedRoots.length > 0) {
-          showNotice(
-            importedRoots.length === 1
-              ? "Imported 1 project from Codex.app."
-              : `Imported ${importedRoots.length} projects from Codex.app.`,
-          );
-        } else {
-          showNotice("No new Codex.app projects were imported.");
-        }
-      } catch (error) {
-        importButton.textContent = "Import selected";
-        cancelButton.disabled = false;
-        importButton.disabled = selectedRoots.size === 0;
-        showNotice(
-          error instanceof Error ? error.message : "Failed to import projects from Codex.app.",
-        );
-      }
+    const useFolderButton = document.createElement("button");
+    useFolderButton.type = "button";
+    useFolderButton.dataset.pocodexWorkspaceRootPickerUseFolderButton = "true";
+    useFolderButton.dataset.variant = "primary";
+    useFolderButton.textContent = state.isConfirming ? "Using..." : "Use folder";
+    useFolderButton.disabled = isBusy || state.pathInputValue.trim().length === 0;
+    useFolderButton.addEventListener("click", () => {
+      void confirmWorkspaceRootPickerSelection();
     });
 
-    actions.append(cancelButton, importButton);
-    dialog.append(header, list, actions);
+    footer.append(cancelButton, useFolderButton);
+    dialog.append(header, pathForm, content, footer);
     backdrop.appendChild(dialog);
     backdrop.addEventListener("click", (event) => {
-      if (event.target !== backdrop) {
+      if (readEventTarget(event) !== backdrop) {
         return;
       }
-      closeDesktopImportDialog(mode === "first-run");
+      if (!canCloseOnboarding) {
+        return;
+      }
+      void cancelWorkspaceRootPicker();
     });
 
-    importHost.appendChild(backdrop);
+    workspaceRootPickerHost.appendChild(backdrop);
   }
 
-  function formatDesktopImportPath(path: string): string {
+  async function submitWorkspaceRootPickerPathInput(): Promise<void> {
+    const state = workspaceRootPickerState;
+    if (!state) {
+      return;
+    }
+
+    await loadWorkspaceRootPickerPath(state.pathInputValue);
+  }
+
+  async function loadWorkspaceRootPickerPath(path: string): Promise<void> {
+    if (!workspaceRootPickerState) {
+      return;
+    }
+
+    workspaceRootPickerState.isLoading = true;
+    workspaceRootPickerState.errorMessage = null;
+    renderWorkspaceRootPicker();
+
+    try {
+      const result = await callPocodexIpc("workspace-root-picker/list", {
+        path,
+      });
+      if (!isWorkspaceRootPickerListResult(result)) {
+        throw new Error("Failed to load folders.");
+      }
+      if (!workspaceRootPickerState) {
+        return;
+      }
+
+      workspaceRootPickerState.currentPath = result.currentPath;
+      workspaceRootPickerState.parentPath = result.parentPath;
+      workspaceRootPickerState.entries = result.entries;
+      workspaceRootPickerState.pathInputValue = result.currentPath;
+      workspaceRootPickerState.errorMessage = null;
+      workspaceRootPickerState.hasOpenedPath = true;
+    } catch (error) {
+      if (!workspaceRootPickerState) {
+        return;
+      }
+      workspaceRootPickerState.errorMessage =
+        error instanceof Error ? error.message : "Failed to load folders.";
+    } finally {
+      if (workspaceRootPickerState) {
+        workspaceRootPickerState.isLoading = false;
+        renderWorkspaceRootPicker();
+      }
+    }
+  }
+
+  async function createWorkspaceRootPickerDirectory(): Promise<void> {
+    const state = workspaceRootPickerState;
+    if (!state) {
+      return;
+    }
+
+    state.isCreatingDirectory = true;
+    state.errorMessage = null;
+    renderWorkspaceRootPicker();
+
+    try {
+      const { parentPath, name } = readWorkspaceRootPickerCreateTarget(state.pathInputValue);
+      const result = await callPocodexIpc("workspace-root-picker/create-directory", {
+        parentPath,
+        name,
+      });
+      const currentPath = readWorkspaceRootPickerCurrentPath(result);
+      if (!currentPath) {
+        throw new Error("Failed to create folder.");
+      }
+      if (!workspaceRootPickerState) {
+        return;
+      }
+
+      workspaceRootPickerState.isCreatingDirectory = false;
+      renderWorkspaceRootPicker();
+      await loadWorkspaceRootPickerPath(currentPath);
+    } catch (error) {
+      if (!workspaceRootPickerState) {
+        return;
+      }
+      workspaceRootPickerState.isCreatingDirectory = false;
+      workspaceRootPickerState.errorMessage =
+        error instanceof Error ? error.message : "Failed to create folder.";
+      renderWorkspaceRootPicker();
+    }
+  }
+
+  async function confirmWorkspaceRootPickerSelection(): Promise<void> {
+    const state = workspaceRootPickerState;
+    if (!state) {
+      return;
+    }
+
+    state.isConfirming = true;
+    state.errorMessage = null;
+    renderWorkspaceRootPicker();
+
+    try {
+      const result = await callPocodexIpc("workspace-root-picker/confirm", {
+        path: state.pathInputValue,
+        context: state.context,
+      });
+      const action = readWorkspaceRootPickerConfirmAction(result);
+      closeWorkspaceRootPicker();
+      showNotice(action === "added" ? "Added project folder." : "Switched to project folder.");
+    } catch (error) {
+      if (!workspaceRootPickerState) {
+        return;
+      }
+      workspaceRootPickerState.isConfirming = false;
+      workspaceRootPickerState.errorMessage =
+        error instanceof Error ? error.message : "Failed to use this folder.";
+      renderWorkspaceRootPicker();
+    }
+  }
+
+  async function cancelWorkspaceRootPicker(): Promise<void> {
+    const state = workspaceRootPickerState;
+    if (!state) {
+      return;
+    }
+
+    if (state.context !== "onboarding") {
+      closeWorkspaceRootPicker();
+      return;
+    }
+    if (!state.hasOpenedPath) {
+      return;
+    }
+
+    state.isCancelling = true;
+    state.errorMessage = null;
+    renderWorkspaceRootPicker();
+
+    try {
+      await callPocodexIpc("workspace-root-picker/cancel", {
+        context: state.context,
+      });
+      closeWorkspaceRootPicker();
+    } catch (error) {
+      if (!workspaceRootPickerState) {
+        return;
+      }
+      workspaceRootPickerState.isCancelling = false;
+      workspaceRootPickerState.errorMessage =
+        error instanceof Error ? error.message : "Failed to cancel project folder selection.";
+      renderWorkspaceRootPicker();
+    }
+  }
+
+  function normalizeWorkspaceRootPickerPathInput(path: string): string {
     const trimmedPath = path.trim();
-    if (trimmedPath.length === 0) {
-      return path;
+    if (
+      trimmedPath.length === 0 ||
+      trimmedPath === "/" ||
+      trimmedPath === "~" ||
+      /^[A-Za-z]:[\\/]?$/.test(trimmedPath) ||
+      /^\\\\[^\\]+\\[^\\]+[\\/]?$/.test(trimmedPath)
+    ) {
+      return trimmedPath;
     }
 
-    return trimmedPath.replace(/^\/(?:users|home)\/[^/]+(?=\/|$)/i, "~");
+    return trimmedPath.replace(/[\\/]+$/, "");
   }
 
-  function createDesktopImportBadge(text: string): HTMLSpanElement {
-    const badge = document.createElement("span");
-    badge.dataset.pocodexImportBadge = "true";
-    badge.textContent = text;
-    return badge;
+  function isAbsoluteWorkspaceRootPickerPath(path: string): boolean {
+    return (
+      path.startsWith("/") ||
+      path === "~" ||
+      path.startsWith("~/") ||
+      path.startsWith("~\\") ||
+      /^[A-Za-z]:[\\/]/.test(path) ||
+      /^\\\\[^\\]+\\[^\\]+(?:\\|$)/.test(path)
+    );
   }
 
-  function closeDesktopImportDialog(markPromptSeen: boolean): void {
-    importHost.hidden = true;
-    importHost.replaceChildren();
-    if (markPromptSeen) {
-      void dismissDesktopImportPrompt();
+  function canCreateWorkspaceRootPickerDirectory(path: string, currentPath: string): boolean {
+    const normalizedPath = normalizeWorkspaceRootPickerPathInput(path);
+    if (
+      normalizedPath.length === 0 ||
+      normalizedPath === normalizeWorkspaceRootPickerPathInput(currentPath)
+    ) {
+      return false;
     }
-  }
 
-  async function dismissDesktopImportPrompt(): Promise<void> {
     try {
-      await callPocodexIpc("desktop-workspace-import/dismiss");
-    } catch (error) {
-      showNotice(
-        error instanceof Error ? error.message : "Failed to dismiss the Codex.app import prompt.",
-      );
+      readWorkspaceRootPickerCreateTarget(normalizedPath);
+      return true;
+    } catch {
+      return false;
     }
   }
 
-  async function listDesktopImportProjects(): Promise<DesktopImportListResult | null> {
-    try {
-      const result = await callPocodexIpc("desktop-workspace-import/list");
-      return isDesktopImportListResult(result) ? result : null;
-    } catch (error) {
-      showNotice(error instanceof Error ? error.message : "Failed to load Codex.app projects.");
-      return null;
+  function readWorkspaceRootPickerCreateTarget(path: string): {
+    parentPath: string;
+    name: string;
+  } {
+    const normalizedPath = normalizeWorkspaceRootPickerPathInput(path);
+    if (normalizedPath.length === 0) {
+      throw new Error("Enter a folder path.");
     }
+    if (!isAbsoluteWorkspaceRootPickerPath(normalizedPath)) {
+      throw new Error("Enter an absolute folder path.");
+    }
+    if (
+      normalizedPath === "/" ||
+      normalizedPath === "~" ||
+      /^[A-Za-z]:[\\/]?$/.test(normalizedPath) ||
+      /^\\\\[^\\]+\\[^\\]+[\\/]?$/.test(normalizedPath)
+    ) {
+      throw new Error("Choose a new folder path.");
+    }
+
+    const lastSeparatorIndex = Math.max(
+      normalizedPath.lastIndexOf("/"),
+      normalizedPath.lastIndexOf("\\"),
+    );
+    if (lastSeparatorIndex < 0) {
+      throw new Error("Enter an absolute folder path.");
+    }
+
+    const separator = normalizedPath[lastSeparatorIndex] ?? "/";
+    let parentPath = normalizedPath.slice(0, lastSeparatorIndex);
+    const name = normalizedPath.slice(lastSeparatorIndex + 1).trim();
+    if (name.length === 0) {
+      throw new Error("Choose a new folder path.");
+    }
+
+    if (parentPath.length === 0 && normalizedPath.startsWith("/")) {
+      parentPath = "/";
+    } else if (/^[A-Za-z]:$/.test(parentPath)) {
+      parentPath = `${parentPath}${separator}`;
+    }
+
+    return {
+      parentPath,
+      name,
+    };
   }
 
   async function callPocodexIpc(method: string, params?: unknown): Promise<unknown> {
@@ -1114,25 +1261,34 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return payload.result;
   }
 
-  function getImportedRoots(result: unknown): string[] {
-    if (!isRecord(result) || !Array.isArray(result.importedRoots)) {
-      return [];
-    }
-
-    return result.importedRoots.filter(
-      (value): value is string => typeof value === "string" && value.length > 0,
+  function isWorkspaceRootPickerListResult(value: unknown): value is WorkspaceRootPickerListResult {
+    return (
+      isRecord(value) &&
+      typeof value.currentPath === "string" &&
+      (value.parentPath === null || typeof value.parentPath === "string") &&
+      typeof value.homePath === "string" &&
+      Array.isArray(value.entries) &&
+      value.entries.every(
+        (entry) =>
+          isRecord(entry) && typeof entry.name === "string" && typeof entry.path === "string",
+      )
     );
   }
 
-  function isDesktopImportListResult(value: unknown): value is DesktopImportListResult {
-    return (
-      isRecord(value) &&
-      typeof value.found === "boolean" &&
-      typeof value.path === "string" &&
-      typeof value.promptSeen === "boolean" &&
-      typeof value.shouldPrompt === "boolean" &&
-      Array.isArray(value.projects)
-    );
+  function readWorkspaceRootPickerCurrentPath(result: unknown): string | null {
+    return isRecord(result) && typeof result.currentPath === "string" ? result.currentPath : null;
+  }
+
+  function readWorkspaceRootPickerConfirmAction(result: unknown): "activated" | "added" {
+    return isRecord(result) && result.action === "activated" ? "activated" : "added";
+  }
+
+  function readEventKey(event: unknown): string {
+    return isRecord(event) && typeof event.key === "string" ? event.key : "";
+  }
+
+  function readEventTarget(event: unknown): EventTarget | null {
+    return isRecord(event) && "target" in event ? (event.target as EventTarget | null) : null;
   }
 
   function dispatchHostMessage(message: unknown): void {
@@ -1196,9 +1352,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return false;
     }
 
-    if (message.type === "pocodex-open-desktop-import-dialog") {
-      const mode = message.mode === "first-run" ? "first-run" : "manual";
-      void openDesktopImportDialog(mode);
+    if (message.type === "pocodex-open-workspace-root-picker") {
+      const context = message.context === "onboarding" ? "onboarding" : "manual";
+      const initialPath = typeof message.initialPath === "string" ? message.initialPath : "";
+      void openWorkspaceRootPicker(context, initialPath);
       return true;
     }
 
@@ -1712,11 +1869,6 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       publishFocusState();
       for (const workerName of workerSubscribers.keys()) {
         sendEnvelope({ type: "worker_subscribe", workerName });
-      }
-      if (!hasAttemptedDesktopImportPrompt) {
-        window.setTimeout(() => {
-          void maybePromptForDesktopImport();
-        }, 250);
       }
     });
 

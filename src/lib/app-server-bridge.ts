@@ -2,15 +2,11 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-import {
-  deriveCodexDesktopGlobalStatePath,
-  loadCodexDesktopProjects,
-} from "./codex-desktop-projects.js";
 import { ensureCodexCliBinary } from "./codex-bundle.js";
 import { deriveCodexHomePath } from "./codex-home.js";
 import {
@@ -44,7 +40,6 @@ interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
   hostId?: string;
-  codexDesktopGlobalStatePath?: string;
   persistedAtomRegistryPath?: string;
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
@@ -106,6 +101,8 @@ interface AppServerMcpResponseEnvelope {
   response?: JsonRpcResponse;
   message?: JsonRpcResponse;
 }
+
+type WorkspaceRootPickerContext = "manual" | "onboarding";
 
 interface TopLevelRequestMessage {
   type: string;
@@ -214,7 +211,6 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly sharedObjectSubscriptions = new Set<string>();
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
-  private readonly codexDesktopGlobalStatePath: string;
   private persistedAtomRegistryPath: string;
   private workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
@@ -240,8 +236,6 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     super();
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
-    this.codexDesktopGlobalStatePath =
-      options.codexDesktopGlobalStatePath ?? deriveCodexDesktopGlobalStatePath();
     this.persistedAtomRegistryPath =
       options.persistedAtomRegistryPath ?? derivePersistedAtomRegistryPath();
     this.workspaceRootRegistryPath =
@@ -389,7 +383,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return;
       case "electron-pick-workspace-root-option":
       case "electron-add-new-workspace-root-option":
-        this.openDesktopImportDialog("manual");
+        this.openWorkspaceRootPicker("manual");
+        return;
+      case "workspace-root-option-picked":
+        await this.handleWorkspaceRootOptionPicked(message);
         return;
       case "electron-update-workspace-root-options":
         await this.handleWorkspaceRootsUpdated(message);
@@ -512,20 +509,25 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
     try {
       switch (method) {
-        case "desktop-workspace-import/list":
+        case "workspace-root-picker/list":
           return buildIpcSuccessResponse(
             requestId,
-            await this.listDesktopWorkspaceImportCandidates(),
+            await this.listWorkspaceRootPickerEntries(payload.params),
           );
-        case "desktop-workspace-import/apply":
+        case "workspace-root-picker/create-directory":
           return buildIpcSuccessResponse(
             requestId,
-            await this.applyDesktopWorkspaceImports(payload.params),
+            await this.createWorkspaceRootPickerDirectory(payload.params),
           );
-        case "desktop-workspace-import/dismiss":
+        case "workspace-root-picker/confirm":
           return buildIpcSuccessResponse(
             requestId,
-            await this.dismissDesktopWorkspaceImportPrompt(),
+            await this.confirmWorkspaceRootPickerSelection(payload.params),
+          );
+        case "workspace-root-picker/cancel":
+          return buildIpcSuccessResponse(
+            requestId,
+            await this.cancelWorkspaceRootPicker(payload.params),
           );
         default:
           return buildIpcErrorResponse(
@@ -651,93 +653,110 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
   }
 
-  private async listDesktopWorkspaceImportCandidates(): Promise<{
-    found: boolean;
-    path: string;
-    promptSeen: boolean;
-    shouldPrompt: boolean;
-    projects: Array<{
-      root: string;
-      label: string;
-      activeInCodex: boolean;
-      alreadyImported: boolean;
-      available: boolean;
+  private async listWorkspaceRootPickerEntries(params: unknown): Promise<{
+    currentPath: string;
+    parentPath: string | null;
+    homePath: string;
+    entries: Array<{
+      name: string;
+      path: string;
     }>;
   }> {
-    const loaded = await loadCodexDesktopProjects(this.codexDesktopGlobalStatePath);
-    const projects = loaded.projects.map((project) => ({
-      root: project.root,
-      label: project.label,
-      activeInCodex: project.active,
-      alreadyImported: this.workspaceRoots.has(project.root),
-      available: project.available,
-    }));
-    const shouldPrompt =
-      !this.desktopImportPromptSeen &&
-      projects.some((project) => project.available && !project.alreadyImported);
+    const currentPath = await this.resolveWorkspaceRootPickerDirectoryPath(params, {
+      fallbackToHome: true,
+      pathKey: "path",
+    });
+    const rawEntries = await readdir(currentPath, { withFileTypes: true });
+    const entries = await Promise.all(
+      rawEntries.map(async (entry) => {
+        const path = join(currentPath, entry.name);
+        if (!(await this.isDirectory(path))) {
+          return null;
+        }
 
-    return {
-      found: loaded.found,
-      path: loaded.path,
-      promptSeen: this.desktopImportPromptSeen,
-      shouldPrompt,
-      projects,
-    };
-  }
-
-  private async applyDesktopWorkspaceImports(params: unknown): Promise<{
-    importedRoots: string[];
-    skippedRoots: string[];
-    promptSeen: boolean;
-  }> {
-    const requestedRoots =
-      isJsonRecord(params) && Array.isArray(params.roots) ? uniqueStrings(params.roots) : [];
-    const loaded = await loadCodexDesktopProjects(this.codexDesktopGlobalStatePath);
-    const importableProjects = new Map(
-      loaded.projects
-        .filter((project) => project.available)
-        .map((project) => [project.root, project] as const),
+        return {
+          name: entry.name,
+          path,
+        };
+      }),
     );
-    const importedRoots: string[] = [];
-    const skippedRoots: string[] = [];
-
-    for (const root of requestedRoots) {
-      const project = importableProjects.get(root);
-      if (!project || this.workspaceRoots.has(root)) {
-        skippedRoots.push(root);
-        continue;
-      }
-
-      this.ensureWorkspaceRoot(root, {
-        label: project.label,
-        setActive: false,
-      });
-      importedRoots.push(root);
-    }
-
-    this.desktopImportPromptSeen = true;
-    await this.persistWorkspaceRootRegistry();
-
-    if (importedRoots.length > 0) {
-      this.emitWorkspaceRootsUpdated();
-    } else {
-      this.syncWorkspaceGlobalState();
-    }
 
     return {
-      importedRoots,
-      skippedRoots,
-      promptSeen: this.desktopImportPromptSeen,
+      currentPath,
+      parentPath: this.getWorkspaceRootPickerParentPath(currentPath),
+      homePath: homedir(),
+      entries: entries
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+        .sort((left, right) =>
+          left.name.localeCompare(right.name, undefined, {
+            numeric: true,
+            sensitivity: "accent",
+          }),
+        ),
     };
   }
 
-  private async dismissDesktopWorkspaceImportPrompt(): Promise<{
-    promptSeen: boolean;
+  private async createWorkspaceRootPickerDirectory(params: unknown): Promise<{
+    currentPath: string;
   }> {
-    this.desktopImportPromptSeen = true;
-    await this.persistWorkspaceRootRegistry();
+    if (!isJsonRecord(params)) {
+      throw new Error("Missing workspace root picker create-directory params.");
+    }
+
+    const parentPath = await this.resolveWorkspaceRootPickerDirectoryPath(params, {
+      fallbackToHome: false,
+      pathKey: "parentPath",
+    });
+    const name = typeof params.name === "string" ? params.name.trim() : "";
+    if (!name) {
+      throw new Error("Folder name cannot be empty.");
+    }
+    if (name === "." || name === "..") {
+      throw new Error("Folder name cannot be . or ..");
+    }
+    if (name.includes("/") || name.includes("\\")) {
+      throw new Error("Folder name cannot contain path separators.");
+    }
+
+    const currentPath = join(parentPath, name);
+    if (existsSync(currentPath)) {
+      throw new Error("That folder already exists.");
+    }
+
+    await mkdir(currentPath);
     return {
-      promptSeen: this.desktopImportPromptSeen,
+      currentPath,
+    };
+  }
+
+  private async confirmWorkspaceRootPickerSelection(params: unknown): Promise<{
+    action: "activated" | "added";
+    root: string;
+  }> {
+    if (!isJsonRecord(params)) {
+      throw new Error("Missing workspace root picker confirm params.");
+    }
+
+    const path = typeof params.path === "string" ? params.path : "";
+    const context = this.readWorkspaceRootPickerContext(params.context);
+    return this.confirmWorkspaceRootSelection(path, context);
+  }
+
+  private async cancelWorkspaceRootPicker(params: unknown): Promise<{
+    cancelled: true;
+  }> {
+    const context = isJsonRecord(params)
+      ? this.readWorkspaceRootPickerContext(params.context)
+      : "manual";
+    if (context === "onboarding") {
+      this.emitBridgeMessage({
+        type: "electron-onboarding-pick-workspace-or-create-default-result",
+        success: false,
+      });
+    }
+
+    return {
+      cancelled: true,
     };
   }
 
@@ -1145,11 +1164,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleOnboardingPickWorkspaceOrCreateDefault(): Promise<void> {
-    await this.persistWorkspaceRootRegistry();
-    this.emitBridgeMessage({
-      type: "electron-onboarding-pick-workspace-or-create-default-result",
-      success: true,
-    });
+    this.openWorkspaceRootPicker("onboarding");
   }
 
   private async handleOnboardingSkipWorkspace(): Promise<void> {
@@ -1883,7 +1898,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const setActive = !isJsonRecord(body) || body.setActive !== false;
 
     if (!root) {
-      this.openDesktopImportDialog("manual");
+      this.openWorkspaceRootPicker("manual");
       return {
         success: false,
         root: "",
@@ -2002,11 +2017,131 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     return this.cwd.length > 0 ? [this.cwd] : [];
   }
 
-  private openDesktopImportDialog(mode: "first-run" | "manual"): void {
+  private openWorkspaceRootPicker(context: WorkspaceRootPickerContext): void {
     this.emitBridgeMessage({
-      type: "pocodex-open-desktop-import-dialog",
-      mode,
+      type: "pocodex-open-workspace-root-picker",
+      context,
+      initialPath: homedir(),
     });
+  }
+
+  private async handleWorkspaceRootOptionPicked(message: JsonRecord): Promise<void> {
+    const root = typeof message.root === "string" ? message.root : null;
+    if (!root) {
+      return;
+    }
+
+    try {
+      await this.confirmWorkspaceRootSelection(root, "manual");
+    } catch (error) {
+      debugLog("app-server", "failed to apply workspace-root-option-picked", {
+        error: normalizeError(error).message,
+        root,
+      });
+    }
+  }
+
+  private async confirmWorkspaceRootSelection(
+    path: string,
+    context: WorkspaceRootPickerContext,
+  ): Promise<{
+    action: "activated" | "added";
+    root: string;
+  }> {
+    const root = await this.resolveWorkspaceRootPickerDirectoryPath(
+      {
+        path,
+      },
+      {
+        fallbackToHome: false,
+        pathKey: "path",
+      },
+    );
+    const action: "activated" | "added" = this.workspaceRoots.has(root) ? "activated" : "added";
+
+    this.ensureWorkspaceRoot(root, {
+      setActive: true,
+    });
+    await this.persistWorkspaceRootRegistry();
+    this.emitWorkspaceRootsUpdated();
+
+    if (context === "onboarding") {
+      this.emitBridgeMessage({
+        type: "electron-onboarding-pick-workspace-or-create-default-result",
+        success: true,
+      });
+    }
+
+    return {
+      action,
+      root,
+    };
+  }
+
+  private readWorkspaceRootPickerContext(value: unknown): WorkspaceRootPickerContext {
+    return value === "onboarding" ? "onboarding" : "manual";
+  }
+
+  private async resolveWorkspaceRootPickerDirectoryPath(
+    params: unknown,
+    options: {
+      fallbackToHome: boolean;
+      pathKey: string;
+    },
+  ): Promise<string> {
+    const candidate =
+      isJsonRecord(params) && typeof params[options.pathKey] === "string"
+        ? (params[options.pathKey] as string)
+        : null;
+    const path = this.normalizeWorkspaceRootPickerPath(candidate, options.fallbackToHome);
+    const stats = await stat(path).catch((error) => {
+      throw normalizeWorkspaceRootPickerPathError(error);
+    });
+    if (!stats.isDirectory()) {
+      throw new Error("Choose an existing folder.");
+    }
+
+    try {
+      await readdir(path);
+    } catch (error) {
+      throw normalizeWorkspaceRootPickerPathError(error);
+    }
+
+    return path;
+  }
+
+  private normalizeWorkspaceRootPickerPath(
+    candidate: string | null,
+    fallbackToHome: boolean,
+  ): string {
+    const trimmedPath = candidate?.trim() ?? "";
+    const path =
+      trimmedPath.length > 0
+        ? expandWorkspaceRootPickerHome(trimmedPath)
+        : fallbackToHome
+          ? homedir()
+          : "";
+    if (!path) {
+      throw new Error("Folder path is required.");
+    }
+    if (!isAbsolute(path)) {
+      throw new Error("Folder path must be absolute.");
+    }
+
+    return resolve(path);
+  }
+
+  private getWorkspaceRootPickerParentPath(path: string): string | null {
+    const parentPath = dirname(path);
+    return parentPath === path ? null : parentPath;
+  }
+
+  private async isDirectory(path: string): Promise<boolean> {
+    try {
+      return (await stat(path)).isDirectory();
+    } catch {
+      return false;
+    }
   }
 
   private getSharedObjectKey(message: JsonRecord): string | null {
@@ -2568,6 +2703,31 @@ function normalizeRequestBody(body: unknown): BodyInit | undefined {
     return undefined;
   }
   return JSON.stringify(body);
+}
+
+function expandWorkspaceRootPickerHome(path: string): string {
+  if (path === "~") {
+    return homedir();
+  }
+  if (path.startsWith("~/")) {
+    return join(homedir(), path.slice(2));
+  }
+
+  return path;
+}
+
+function normalizeWorkspaceRootPickerPathError(error: unknown): Error {
+  if (isJsonRecord(error) && error.code === "ENOENT") {
+    return new Error("Choose an existing folder.");
+  }
+  if (isJsonRecord(error) && error.code === "EACCES") {
+    return new Error("That folder is not readable.");
+  }
+  if (isJsonRecord(error) && error.code === "ENOTDIR") {
+    return new Error("Choose an existing folder.");
+  }
+
+  return normalizeError(error);
 }
 
 function normalizeError(error: unknown): Error {
