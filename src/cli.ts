@@ -19,7 +19,7 @@ const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_LISTEN = "127.0.0.1:8787";
 const POCODEX_STYLESHEET_HREF = "/pocodex.css";
 const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--app-server", "--listen", "--token"]);
-const BOOLEAN_FLAG_NAMES = new Set(["--dev"]);
+const BOOLEAN_FLAG_NAMES = new Set(["--dev", "--yolo"]);
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -49,6 +49,7 @@ async function main(): Promise<void> {
   const relay = await AppServerBridge.connect({
     appPath: options.appPath,
     appServerPath: options.appServerPath,
+    appServerYolo: options.appServerYolo,
     cwd: process.cwd(),
   });
 
@@ -137,6 +138,7 @@ function parseServeCommand(argv: string[]): ServeCommandOptions {
   const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
   const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
+  const appServerYolo = hasFlag(argv, "--yolo");
 
   const [listenHost, portText] = listen.split(":");
   const listenPort = Number.parseInt(portText ?? "", 10);
@@ -147,6 +149,7 @@ function parseServeCommand(argv: string[]): ServeCommandOptions {
   return {
     appPath,
     appServerPath,
+    appServerYolo,
     devMode,
     listenHost,
     listenPort,
@@ -199,6 +202,7 @@ function printUsage(): void {
   console.error(
     "  pocodex [--token <secret>] [--app /Applications/Codex.app] [--app-server /Applications/Codex.app/Contents/Resources/codex] [--listen 127.0.0.1:8787] [--dev]",
   );
+  console.error("  pocodex [--yolo]");
 }
 
 function watchPocodexStylesheet(cssFilePath: string, onChange: () => void): () => void {

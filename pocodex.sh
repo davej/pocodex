@@ -20,6 +20,7 @@ LOG_FILE="${POCODEX_LOG_FILE:-/tmp/pocodex.log}"
 PID_FILE="${POCODEX_PID_FILE:-/tmp/pocodex.pid}"
 KILL_EXISTING="${POCODEX_KILL_EXISTING:-0}"
 FOREGROUND="${POCODEX_FOREGROUND:-0}"
+YOLO="${POCODEX_YOLO:-1}"
 NODE_BIN="${NODE_PATH:-node}"
 
 EXTRA_ARGS=()
@@ -40,6 +41,7 @@ POCODEX_PROJECT_DIR   Project root (default: script directory)
   POCODEX_PID_FILE      PID file path (default: /tmp/pocodex.pid)
   POCODEX_KILL_EXISTING  Set to 1 to kill stale PID before start
   POCODEX_FOREGROUND    Set to 1 to run in foreground
+  POCODEX_YOLO          Set to 1 to pass --yolo to codex app-server (default: 1)
 
 Options:
   --app PATH             Override the Codex.app path
@@ -50,6 +52,8 @@ Options:
   --pid-file PATH         Override PID file path
   --kill-existing         Kill any process in PID file before launch
   --foreground            Run in foreground and exit with the server status
+  --yolo                  Pass --yolo to codex app-server
+  --no-yolo               Do not pass --yolo to codex app-server
   --help                  Show this message
 USAGE
 }
@@ -86,6 +90,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --foreground)
       FOREGROUND=1
+      shift 1
+      ;;
+    --yolo)
+      YOLO=1
+      shift 1
+      ;;
+    --no-yolo)
+      YOLO=0
       shift 1
       ;;
     --help|-h)
@@ -151,6 +163,9 @@ CMD=("$NODE_BIN" "dist/cli.js" --app "$APP_PATH" --app-server "$APP_SERVER_PATH"
 if [[ -n "$TOKEN" ]]; then
   CMD+=(--token "$TOKEN")
 fi
+if [[ "$YOLO" == "1" ]]; then
+  CMD+=(--yolo)
+fi
 CMD+=("${EXTRA_ARGS[@]}")
 
 if [[ "$FOREGROUND" == "1" ]]; then
@@ -179,3 +194,4 @@ echo "PID file: $PID_FILE"
 echo "Listen: $LISTEN"
 echo "App: $APP_PATH"
 echo "App-server: $APP_SERVER_PATH"
+echo "Yolo: $YOLO"

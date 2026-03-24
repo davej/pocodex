@@ -42,6 +42,7 @@ interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
   appServerPath?: string;
+  appServerYolo?: boolean;
   hostId?: string;
   codexDesktopGlobalStatePath?: string;
   persistedAtomRegistryPath?: string;
@@ -188,7 +189,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.syncWorkspaceGlobalState();
     this.child = spawn(
       deriveCodexCliBinaryPath(options.appPath, options.appServerPath),
-      ["app-server", "--listen", "stdio://"],
+      ["app-server", ...(options.appServerYolo ? ["--yolo"] : []), "--listen", "stdio://"],
       {
         stdio: "pipe",
       },
