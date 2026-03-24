@@ -21,6 +21,8 @@ export interface PocodexServerOptions {
   webviewRoot: string;
   readPocodexStylesheet: () => Promise<string>;
   renderIndexHtml: () => Promise<string>;
+  renderWebManifest: () => Promise<string>;
+  renderServiceWorkerScript: () => Promise<string>;
   heartbeatIntervalMs?: number;
   heartbeatTimeoutMs?: number;
 }

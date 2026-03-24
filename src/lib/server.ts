@@ -65,6 +65,8 @@ export class PocodexServer {
   private readonly heartbeatTimeoutMs: number;
   private readonly heartbeatTimer: NodeJS.Timeout;
   private indexHtmlPromise?: Promise<string>;
+  private serviceWorkerScriptPromise?: Promise<string>;
+  private webManifestPromise?: Promise<string>;
 
   constructor(private readonly options: PocodexServerOptions) {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -195,6 +197,23 @@ export class PocodexServer {
         response.statusCode = 500;
         response.end("Unable to load Pocodex stylesheet");
       }
+      return;
+    }
+
+    if (url.pathname === "/manifest.webmanifest") {
+      response.statusCode = 200;
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
+      response.end(await this.getWebManifest());
+      return;
+    }
+
+    if (url.pathname === "/service-worker.js") {
+      response.statusCode = 200;
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+      response.setHeader("Service-Worker-Allowed", "/");
+      response.end(await this.getServiceWorkerScript());
       return;
     }
 
@@ -807,6 +826,20 @@ export class PocodexServer {
       this.indexHtmlPromise = this.options.renderIndexHtml();
     }
     return this.indexHtmlPromise;
+  }
+
+  private getServiceWorkerScript(): Promise<string> {
+    if (!this.serviceWorkerScriptPromise) {
+      this.serviceWorkerScriptPromise = this.options.renderServiceWorkerScript();
+    }
+    return this.serviceWorkerScriptPromise;
+  }
+
+  private getWebManifest(): Promise<string> {
+    if (!this.webManifestPromise) {
+      this.webManifestPromise = this.options.renderWebManifest();
+    }
+    return this.webManifestPromise;
   }
 }
 

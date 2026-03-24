@@ -5,6 +5,7 @@ export function patchIndexHtml(
   options: {
     bootstrapScript: string;
     faviconHref?: string | null;
+    headTags?: string[];
     stylesheetHref: string;
   },
 ): string {
@@ -18,6 +19,7 @@ export function patchIndexHtml(
     (_match, indentation, entryScript) =>
       [
         faviconTag ? `${indentation}${faviconTag}` : "",
+        ...(options.headTags ?? []).map((tag) => `${indentation}${tag}`),
         `${indentation}${stylesheetTag}`,
         `${indentation}${bootstrapTag}`,
         `${indentation}${entryScript}`,
@@ -40,5 +42,33 @@ export function patchIndexHtml(
     throw new Error("Unable to update the Codex content security policy");
   }
 
-  return withCsp;
+  return ensurePwaCspDirectives(withCsp);
+}
+
+function ensurePwaCspDirectives(html: string): string {
+  const quotedSelf = html.includes("&#39;self&#39;") ? "&#39;self&#39;" : "'self'";
+  const withManifestSrc = ensureCspDirective(html, "manifest-src", quotedSelf);
+  return ensureCspDirective(withManifestSrc, "worker-src", quotedSelf);
+}
+
+function ensureCspDirective(html: string, directive: string, value: string): string {
+  if (html.includes(`${directive} ${value}`)) {
+    return html;
+  }
+
+  const styleDirectivePattern = new RegExp(`style-src\\s+${escapeRegExp(value)}`);
+  const withDirective = html.replace(
+    styleDirectivePattern,
+    `${directive} ${value}; style-src ${value}`,
+  );
+
+  if (withDirective === html) {
+    throw new Error(`Unable to add ${directive} to the Codex content security policy`);
+  }
+
+  return withDirective;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

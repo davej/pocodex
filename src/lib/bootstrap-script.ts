@@ -6,6 +6,7 @@ import type {
 import { serializeInlineScript } from "./inline-script.js";
 
 export interface BootstrapScriptConfig {
+  devMode?: boolean;
   sentryOptions: SentryInitOptions;
   stylesheetHref: string;
   importIconSvg?: string;
@@ -72,6 +73,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   const POCODEX_STYLESHEET_ID = "pocodex-stylesheet";
+  const POCODEX_SERVICE_WORKER_PATH = "/service-worker.js";
   const TOKEN_STORAGE_KEY = "__pocodex_token";
   const THREAD_QUERY_KEY = "thread";
   const LEGACY_INITIAL_ROUTE_QUERY_KEY = "initialRoute";
@@ -183,6 +185,61 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     return link;
+  }
+
+  function getStorage(storageName: "localStorage" | "sessionStorage"): {
+    getItem: (key: string) => string | null;
+    setItem: (key: string, value: string) => void;
+    removeItem?: (key: string) => void;
+  } | null {
+    try {
+      const windowRecord = window as unknown as Record<string, unknown>;
+      const globalRecord = globalThis as Record<string, unknown>;
+      const candidate = windowRecord[storageName] ?? globalRecord[storageName];
+      if (
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "getItem" in candidate &&
+        typeof candidate.getItem === "function" &&
+        "setItem" in candidate &&
+        typeof candidate.setItem === "function"
+      ) {
+        return candidate as {
+          getItem: (key: string) => string | null;
+          setItem: (key: string, value: string) => void;
+          removeItem?: (key: string) => void;
+        };
+      }
+    } catch {
+      // Continue without persistent storage support.
+    }
+
+    return null;
+  }
+
+  function readStoredTokenValue(storageName: "localStorage" | "sessionStorage"): string {
+    const storedValue = getStorage(storageName)?.getItem(TOKEN_STORAGE_KEY)?.trim();
+    return storedValue ? storedValue : "";
+  }
+
+  function persistSessionToken(token: string): void {
+    for (const storageName of ["sessionStorage", "localStorage"] as const) {
+      const storage = getStorage(storageName);
+      if (!storage) {
+        continue;
+      }
+
+      if (token) {
+        storage.setItem(TOKEN_STORAGE_KEY, token);
+        continue;
+      }
+
+      if (typeof storage.removeItem === "function") {
+        storage.removeItem(TOKEN_STORAGE_KEY);
+      } else {
+        storage.setItem(TOKEN_STORAGE_KEY, "");
+      }
+    }
   }
 
   function reloadStylesheet(href: string): void {
@@ -1677,12 +1734,44 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   function getStoredToken(): string {
     const url = new URL(window.location.href);
-    const tokenFromQuery = url.searchParams.get("token");
+    const tokenFromQuery = url.searchParams.get("token")?.trim();
     if (tokenFromQuery) {
-      sessionStorage.setItem(TOKEN_STORAGE_KEY, tokenFromQuery);
+      persistSessionToken(tokenFromQuery);
       return tokenFromQuery;
     }
-    return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
+    return readStoredTokenValue("sessionStorage") || readStoredTokenValue("localStorage");
+  }
+
+  async function registerPwaServiceWorker(): Promise<void> {
+    if (config.devMode) {
+      return;
+    }
+
+    const navigatorObject = window.navigator as
+      | {
+          serviceWorker?: {
+            register?: (
+              scriptUrl: string,
+              options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" },
+            ) => Promise<unknown>;
+          };
+        }
+      | undefined;
+    if (
+      !navigatorObject?.serviceWorker ||
+      typeof navigatorObject.serviceWorker.register !== "function"
+    ) {
+      return;
+    }
+
+    try {
+      await navigatorObject.serviceWorker.register(POCODEX_SERVICE_WORKER_PATH, {
+        scope: "/",
+        updateViaCache: "none",
+      });
+    } catch {
+      // Service workers require a secure context outside localhost. Ignore failures silently.
+    }
   }
 
   function getSocketUrl(token: string): string {
@@ -1951,6 +2040,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     if (!validation.ok) {
       isConnecting = false;
       if (validation.reason === "unauthorized") {
+        persistSessionToken("");
         setConnectionPhase(
           "reload-required",
           token
@@ -2224,5 +2314,6 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     { once: true },
   );
 
+  void registerPwaServiceWorker();
   void connectSocket();
 }

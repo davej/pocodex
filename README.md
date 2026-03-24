@@ -20,6 +20,8 @@ pocodex
 
 Pocodex prints a local URL and, when applicable, an "Open" URL. Open the printed URL in your browser.
 
+Pocodex now publishes a web manifest and service worker, so on supported browsers you can install it as a standalone app. If you are using a tokenized URL, open that URL once in the browser you plan to install from so the token is stored for later standalone launches.
+
 ## Requirements
 
 - macOS with a local Codex install, usually `/Applications/Codex.app`, or WSL with the Windows Codex install available under `C:\Program Files\WindowsApps\OpenAI.Codex_...\app`
@@ -69,6 +71,7 @@ Pocodex reads the shipped `app.asar` from the desktop install and serves those f
 Before serving `index.html`, Pocodex injects:
 
 - `pocodex.css`
+- PWA metadata including the web manifest and mobile install hints
 - an inline bootstrap script that installs the browser-side bridge
 - a matching CSP hash so the injected script can run under Codex's content security policy
 

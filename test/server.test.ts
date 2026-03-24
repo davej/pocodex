@@ -163,6 +163,35 @@ describe("PocodexServer", () => {
     await expect(response.text()).resolves.toContain("[data-pocodex-toast]");
   });
 
+  it("serves a web manifest for installable clients", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/manifest.webmanifest`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/manifest+json");
+    await expect(response.json()).resolves.toEqual({
+      id: "/",
+      name: "Pocodex",
+      short_name: "Pocodex",
+      start_url: "./",
+      display: "standalone",
+    });
+  });
+
+  it("serves a service worker script for shell caching", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/service-worker.js`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/javascript");
+    expect(response.headers.get("service-worker-allowed")).toBe("/");
+    await expect(response.text()).resolves.toContain("pocodex-shell:test");
+  });
+
   it("validates session tokens before websocket attach", async () => {
     const { server, url } = await createTestServer();
     servers.push(server);
@@ -491,6 +520,7 @@ describe("PocodexServer", () => {
     });
     first.close();
     await firstClosed;
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     second.send(
       JSON.stringify({
@@ -582,6 +612,15 @@ async function createTestServer(
     webviewRoot,
     readPocodexStylesheet: async () => "#pocodex-toast-host [data-pocodex-toast] { color: red; }",
     renderIndexHtml: async () => "<!doctype html><html><body></body></html>",
+    renderWebManifest: async () =>
+      JSON.stringify({
+        id: "/",
+        name: "Pocodex",
+        short_name: "Pocodex",
+        start_url: "./",
+        display: "standalone",
+      }),
+    renderServiceWorkerScript: async () => "const CACHE_NAME = 'pocodex-shell:test';",
     heartbeatIntervalMs: options.heartbeatIntervalMs,
     heartbeatTimeoutMs: options.heartbeatTimeoutMs,
   });

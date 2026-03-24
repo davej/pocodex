@@ -563,11 +563,19 @@ function setMobileSidebarClosedState(contentPane: TestElement, navigation?: Test
 function createBootstrapHarness(
   options: {
     href?: string;
+    localStorageEntries?: Record<string, string>;
     mobile?: boolean;
   } = {},
 ) {
   const href = options.href ?? "http://127.0.0.1:8787/?token=secret";
-  const storage = new Map<string, string>();
+  const localStorageEntries = new Map<string, string>(
+    Object.entries(options.localStorageEntries ?? {}),
+  );
+  const sessionStorageEntries = new Map<string, string>();
+  const serviceWorkerRegistrations: Array<{
+    scriptUrl: string;
+    options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" };
+  }> = [];
   const timers = new Map<number, () => void>();
   const fetchCalls: Array<{ input: unknown; init: unknown }> = [];
   const dispatchedMessages: unknown[] = [];
@@ -605,6 +613,25 @@ function createBootstrapHarness(
     setTimeout: (callback: () => void, delay: number) => number;
     clearTimeout: (id: number) => void;
     matchMedia: (query: string) => { matches: boolean; media: string };
+    navigator: {
+      onLine: boolean;
+      serviceWorker: {
+        register: (
+          scriptUrl: string,
+          options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" },
+        ) => Promise<Record<string, never>>;
+      };
+    };
+    localStorage: {
+      getItem: (key: string) => string | null;
+      setItem: (key: string, value: string) => void;
+      removeItem: (key: string) => void;
+    };
+    sessionStorage: {
+      getItem: (key: string) => string | null;
+      setItem: (key: string, value: string) => void;
+      removeItem: (key: string) => void;
+    };
     innerWidth: number;
     locationReloaded: boolean;
   };
@@ -655,6 +682,36 @@ function createBootstrapHarness(
     matches: options.mobile === true && query.includes("max-width"),
     media: query,
   });
+  windowObject.navigator = {
+    onLine: true,
+    serviceWorker: {
+      register: async (scriptUrl, serviceWorkerOptions) => {
+        serviceWorkerRegistrations.push({
+          scriptUrl,
+          options: serviceWorkerOptions,
+        });
+        return {};
+      },
+    },
+  };
+  windowObject.localStorage = {
+    getItem: (key: string) => localStorageEntries.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      localStorageEntries.set(key, value);
+    },
+    removeItem: (key: string) => {
+      localStorageEntries.delete(key);
+    },
+  };
+  windowObject.sessionStorage = {
+    getItem: (key: string) => sessionStorageEntries.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      sessionStorageEntries.set(key, value);
+    },
+    removeItem: (key: string) => {
+      sessionStorageEntries.delete(key);
+    },
+  };
   windowObject.innerWidth = options.mobile === true ? 390 : 1280;
   windowObject.locationReloaded = false;
 
@@ -678,12 +735,9 @@ function createBootstrapHarness(
     Request: TestRequest,
     Response: TestResponse,
     WebSocket: TestWebSocket,
-    sessionStorage: {
-      setItem: (key: string, value: string) => {
-        storage.set(key, value);
-      },
-      getItem: (key: string) => storage.get(key) ?? null,
-    },
+    navigator: windowObject.navigator,
+    localStorage: windowObject.localStorage,
+    sessionStorage: windowObject.sessionStorage,
     Element: TestElement,
     Object,
     Array,
@@ -745,6 +799,15 @@ function createBootstrapHarness(
       }
       return socket.sentMessages.map((message) => JSON.parse(message) as unknown);
     },
+    getLocalStorageValue(key: string): string | null {
+      return localStorageEntries.get(key) ?? null;
+    },
+    getServiceWorkerRegistrations(): Array<{
+      scriptUrl: string;
+      options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" };
+    }> {
+      return [...serviceWorkerRegistrations];
+    },
   };
 }
 
@@ -767,6 +830,65 @@ describe("renderBootstrapScript", () => {
     expect(script).toContain('"appVersion":"\\u003cpreview>"');
     expect(script).not.toContain('"appVersion":"<preview>"');
     expect(script).not.toContain("</script>");
+  });
+
+  it("registers the Pocodex service worker outside dev mode", () => {
+    const harness = createBootstrapHarness();
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    harness.run(script);
+
+    expect(harness.getServiceWorkerRegistrations()).toEqual([
+      {
+        scriptUrl: "/service-worker.js",
+        options: {
+          scope: "/",
+          updateViaCache: "none",
+        },
+      },
+    ]);
+  });
+
+  it("persists the session token for standalone launches without a token query", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    const firstHarness = createBootstrapHarness();
+    firstHarness.run(script);
+    expect(firstHarness.getLocalStorageValue("__pocodex_token")).toBe("secret");
+
+    const standaloneHarness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/",
+      localStorageEntries: {
+        __pocodex_token: "secret",
+      },
+    });
+    standaloneHarness.run(script);
+
+    expect(standaloneHarness.fetchCalls).toContainEqual({
+      input: "/session-check?token=secret",
+      init: {
+        cache: "no-store",
+        credentials: "same-origin",
+      },
+    });
   });
 
   it("runs without throwing and installs the browser bridge", () => {
