@@ -1,6 +1,8 @@
-import { readFile, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 export interface CodexDesktopProject {
   root: string;
@@ -32,15 +34,21 @@ export async function loadCodexDesktopProjects(
       projects,
     };
   } catch (error) {
-    if (isMissingFileError(error)) {
-      return {
-        found: false,
-        path: globalStatePath,
-        projects: [],
-      };
+    if (!isMissingFileError(error)) {
+      throw error;
     }
-    throw error;
   }
+
+  const sqliteFallback = await loadCodexCliProjectsFromSqlite(globalStatePath);
+  if (sqliteFallback) {
+    return sqliteFallback;
+  }
+
+  return {
+    found: false,
+    path: globalStatePath,
+    projects: [],
+  };
 }
 
 async function parseCodexDesktopProjects(raw: string): Promise<CodexDesktopProject[]> {
@@ -104,6 +112,158 @@ async function isDirectory(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function loadCodexCliProjectsFromSqlite(
+  globalStatePath: string,
+): Promise<LoadedCodexDesktopProjects | null> {
+  const candidatePaths = await listCodexStateDatabasePaths(dirname(globalStatePath));
+  for (const path of candidatePaths) {
+    const projects = await loadProjectsFromStateDatabase(path);
+    return {
+      found: true,
+      path,
+      projects,
+    };
+  }
+
+  return null;
+}
+
+async function listCodexStateDatabasePaths(codexHome: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(codexHome);
+  } catch {
+    return [];
+  }
+
+  const statePaths = await Promise.all(
+    entries
+      .filter((entry) => /^state_\d+\.sqlite$/u.test(entry))
+      .map(async (entry) => {
+        const path = join(codexHome, entry);
+        try {
+          const details = await stat(path);
+          return details.isFile() ? { path, mtimeMs: details.mtimeMs } : null;
+        } catch {
+          return null;
+        }
+      }),
+  );
+
+  return statePaths
+    .filter((entry): entry is { path: string; mtimeMs: number } => entry !== null)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .map((entry) => entry.path);
+}
+
+async function loadProjectsFromStateDatabase(path: string): Promise<CodexDesktopProject[]> {
+  const database = new DatabaseSync(path, {
+    readOnly: true,
+  });
+
+  try {
+    const rows = database
+      .prepare(
+        `
+          SELECT
+            cwd,
+            MAX(updated_at) AS updated_at,
+            MAX(CASE WHEN archived = 0 THEN 1 ELSE 0 END) AS active
+          FROM threads
+          WHERE TRIM(cwd) != ''
+          GROUP BY cwd
+          ORDER BY updated_at DESC
+        `,
+      )
+      .all() as Array<{
+      cwd: unknown;
+      updated_at: unknown;
+      active: unknown;
+    }>;
+
+    const projectsByRoot = new Map<
+      string,
+      {
+        root: string;
+        label: string;
+        active: boolean;
+        available: boolean;
+        updatedAt: number;
+      }
+    >();
+
+    for (const row of rows) {
+      if (typeof row.cwd !== "string") {
+        continue;
+      }
+
+      const root = await resolveWorkspaceRoot(row.cwd);
+      if (!root) {
+        continue;
+      }
+
+      const updatedAt =
+        typeof row.updated_at === "number"
+          ? row.updated_at
+          : Number.parseInt(String(row.updated_at ?? "0"), 10) || 0;
+      const active = row.active === 1 || row.active === "1";
+      const available = await isDirectory(root);
+      const existing = projectsByRoot.get(root);
+
+      if (!existing || updatedAt > existing.updatedAt) {
+        projectsByRoot.set(root, {
+          root,
+          label: basename(root) || "Project",
+          active: existing ? existing.active || active : active,
+          available,
+          updatedAt,
+        });
+        continue;
+      }
+
+      existing.active = existing.active || active;
+      existing.available = existing.available || available;
+    }
+
+    return [...projectsByRoot.values()]
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .map(({ root, label, active, available }) => ({
+        root,
+        label,
+        active,
+        available,
+      }));
+  } finally {
+    database.close();
+  }
+}
+
+async function resolveWorkspaceRoot(path: string): Promise<string | null> {
+  const cwd = path.trim();
+  if (cwd.length === 0) {
+    return null;
+  }
+
+  try {
+    const root = await runGitCommand(resolve(cwd), ["rev-parse", "--show-toplevel"]);
+    return root.length > 0 ? root : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runGitCommand(cwd: string, args: string[]): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    execFile("git", args, { cwd }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolvePromise(stdout.trim());
+    });
+  });
 }
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
