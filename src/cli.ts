@@ -18,7 +18,7 @@ import { PocodexServer } from "./lib/server.js";
 const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_LISTEN = "127.0.0.1:8787";
 const POCODEX_STYLESHEET_HREF = "/pocodex.css";
-const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--listen", "--token"]);
+const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--app-server", "--listen", "--token"]);
 const BOOLEAN_FLAG_NAMES = new Set(["--dev"]);
 
 async function main(): Promise<void> {
@@ -48,6 +48,7 @@ async function main(): Promise<void> {
   const bundle = await loadCodexBundle(options.appPath);
   const relay = await AppServerBridge.connect({
     appPath: options.appPath,
+    appServerPath: options.appServerPath,
     cwd: process.cwd(),
   });
 
@@ -120,7 +121,9 @@ async function main(): Promise<void> {
     );
   }
   console.log(`Using Codex ${bundle.version} from ${bundle.appPath}`);
-  console.log(`Using direct app-server bridge from ${options.appPath}`);
+  console.log(
+    `Using direct app-server bridge from ${options.appServerPath ?? `${options.appPath}/Contents/Resources/codex`}`,
+  );
   if (options.devMode) {
     console.log(`Watching ${pocodexCssPath} for stylesheet changes`);
   }
@@ -130,6 +133,7 @@ function parseServeCommand(argv: string[]): ServeCommandOptions {
   validateServeArgs(argv);
 
   const appPath = readFlag(argv, "--app") ?? DEFAULT_APP_PATH;
+  const appServerPath = readFlag(argv, "--app-server");
   const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
   const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
@@ -142,6 +146,7 @@ function parseServeCommand(argv: string[]): ServeCommandOptions {
 
   return {
     appPath,
+    appServerPath,
     devMode,
     listenHost,
     listenPort,
@@ -192,7 +197,7 @@ function hasFlag(argv: string[], name: string): boolean {
 function printUsage(): void {
   console.error("Usage:");
   console.error(
-    "  pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]",
+    "  pocodex [--token <secret>] [--app /Applications/Codex.app] [--app-server /Applications/Codex.app/Contents/Resources/codex] [--listen 127.0.0.1:8787] [--dev]",
   );
 }
 

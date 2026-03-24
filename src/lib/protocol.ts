@@ -7,6 +7,7 @@ export interface SentryInitOptions {
 
 export interface ServeCommandOptions {
   appPath: string;
+  appServerPath?: string;
   devMode: boolean;
   listenHost: string;
   listenPort: number;

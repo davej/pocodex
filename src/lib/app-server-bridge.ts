@@ -41,6 +41,7 @@ import {
 interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
+  appServerPath?: string;
   hostId?: string;
   codexDesktopGlobalStatePath?: string;
   persistedAtomRegistryPath?: string;
@@ -186,7 +187,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
     this.syncWorkspaceGlobalState();
     this.child = spawn(
-      deriveCodexCliBinaryPath(options.appPath),
+      deriveCodexCliBinaryPath(options.appPath, options.appServerPath),
       ["app-server", "--listen", "stdio://"],
       {
         stdio: "pipe",
