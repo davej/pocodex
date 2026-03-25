@@ -1129,6 +1129,23 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         });
         return;
       }
+      if (isRecord(message) && message.type === "open-in-browser") {
+        const rawUrl = typeof message.url === "string" ? message.url.trim() : "";
+        if (rawUrl.length === 0) {
+          showNotice("Open in browser failed: missing URL.");
+          return;
+        }
+        try {
+          const url = new URL(rawUrl);
+          if (url.protocol !== "http:" && url.protocol !== "https:") {
+            throw new Error(`Unsupported protocol: ${url.protocol}`);
+          }
+          window.open(url.toString(), "_blank", "noopener,noreferrer");
+        } catch {
+          showNotice("Open in browser failed: invalid URL.");
+        }
+        return;
+      }
       sendEnvelope({ type: "bridge_message", message });
     },
     getPathForFile: () => null,

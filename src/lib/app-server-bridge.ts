@@ -2713,7 +2713,30 @@ async function createPullRequest(body: unknown): Promise<{
     };
   }
 
-  const args = ["pr", "create", "--head", headBranch, "--title", title];
+  const repository = await resolveGitRepository(cwd, new Map());
+  const repoCwd = repository?.root ?? cwd;
+  const currentBranch = (await resolveCurrentGitBranch(repoCwd)) ?? headBranch;
+  const headRemoteName =
+    (await resolveConfiguredBranchRemote(repoCwd, currentBranch)) ??
+    (await resolveFirstGitRemote(repoCwd));
+  const baseRemoteName = (await resolveExistingRemote(repoCwd, "origin")) ?? headRemoteName;
+  const headRemoteUrl =
+    headRemoteName == null ? null : await resolveGitRemoteUrl(repoCwd, headRemoteName);
+  const baseRemoteUrl =
+    baseRemoteName == null ? null : await resolveGitRemoteUrl(repoCwd, baseRemoteName);
+  const headRepo = headRemoteUrl == null ? null : parseGitHubRepoSpec(headRemoteUrl);
+  const baseRepo = baseRemoteUrl == null ? null : parseGitHubRepoSpec(baseRemoteUrl);
+
+  const headRef =
+    headRepo != null && baseRepo != null && !sameGitHubRepo(headRepo, baseRepo)
+      ? `${headRepo.owner}:${headBranch}`
+      : headBranch;
+
+  const args = ["pr", "create"];
+  if (baseRepo != null) {
+    args.push("--repo", `${baseRepo.owner}/${baseRepo.repo}`);
+  }
+  args.push("--head", headRef, "--title", title);
   if (baseBranch.length > 0) {
     args.push("--base", baseBranch);
   }
@@ -2819,6 +2842,19 @@ async function execGhCommand(
   });
 }
 
+async function resolveExistingRemote(cwd: string, remote: string): Promise<string | null> {
+  const result = await execGitCommand(cwd, ["remote", "get-url", remote]);
+  return result.success ? remote : null;
+}
+
+async function resolveGitRemoteUrl(cwd: string, remote: string): Promise<string | null> {
+  const result = await execGitCommand(cwd, ["config", "--get", `remote.${remote}.url`]);
+  if (!result.success || result.stdout.length === 0) {
+    return null;
+  }
+  return result.stdout;
+}
+
 function buildGitExecOutput(result: { command: string; stdout: string; stderr: string }): {
   command: string;
   output: string;
@@ -2887,6 +2923,28 @@ function extractJsonRpcErrorMessage(error: unknown): string {
 function extractFirstUrl(value: string): string | null {
   const match = value.match(/https?:\/\/\S+/);
   return match ? match[0] : null;
+}
+
+function parseGitHubRepoSpec(url: string): { owner: string; repo: string } | null {
+  const normalized = url.trim();
+  const match = /github\.com[:/](?<owner>[^/]+)\/(?<repo>[^/\s]+?)(?:\.git)?$/.exec(normalized);
+  if (!match?.groups) {
+    return null;
+  }
+  return {
+    owner: match.groups.owner,
+    repo: match.groups.repo,
+  };
+}
+
+function sameGitHubRepo(
+  left: { owner: string; repo: string },
+  right: { owner: string; repo: string },
+): boolean {
+  return (
+    left.owner.toLowerCase() === right.owner.toLowerCase() &&
+    left.repo.toLowerCase() === right.repo.toLowerCase()
+  );
 }
 
 function shouldLogCodexFetchFailure(status: number, body: unknown): boolean {
