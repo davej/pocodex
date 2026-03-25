@@ -858,6 +858,60 @@ describe("renderBootstrapScript", () => {
     ]);
   });
 
+  it("offers reconnect and reload actions from the connection status overlay", async () => {
+    const harness = createBootstrapHarness({ mobile: true });
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const firstSocket = TestWebSocket.latest;
+    expect(firstSocket).toBeTruthy();
+
+    harness.openSocket();
+    await flushBootstrapMicrotasks();
+
+    firstSocket?.emit("close", {
+      code: 4000,
+      reason: "heartbeat-timeout",
+    });
+    await flushBootstrapMicrotasks();
+
+    const statusHost = harness.document.getElementById("pocodex-status-host");
+    const reconnectButton = harness.document.querySelector(
+      '[data-pocodex-status-action="reconnect"]',
+    );
+    const reloadButton = harness.document.querySelector('[data-pocodex-status-action="reload"]');
+    const reconnectToast = harness.document.querySelector('[data-pocodex-toast="true"]');
+
+    expect(statusHost?.hidden).toBe(false);
+    expect(reconnectButton).toBeTruthy();
+    expect(reloadButton).toBeTruthy();
+    expect(reconnectToast).toBeNull();
+
+    reloadButton?.click();
+    expect(harness.windowObject.locationReloaded).toBe(true);
+
+    reconnectButton?.click();
+    drainTestTimers(harness.timers, 3);
+    await flushBootstrapMicrotasks();
+
+    expect(
+      harness.fetchCalls.filter((call) => call.input === "/session-check?token=secret"),
+    ).toHaveLength(2);
+    expect(TestWebSocket.latest).not.toBe(firstSocket);
+    expect(TestWebSocket.latest?.url).toBe("ws://127.0.0.1:8787/session?token=secret");
+  });
+
   it("tracks the current route on the document element", () => {
     const harness = createBootstrapHarness({
       href: "http://127.0.0.1:8787/settings/general-settings?token=secret",
@@ -2832,6 +2886,78 @@ describe("renderBootstrapScript", () => {
 
     expect(navigateMessages).toHaveLength(1);
     expect(resumeRequests).toHaveLength(1);
+  });
+
+  it("replays the local-thread restore sequence after a websocket reconnect", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const firstSocket = TestWebSocket.latest;
+    expect(firstSocket).toBeTruthy();
+
+    harness.openSocket();
+    await flushBootstrapMicrotasks();
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "ready",
+    });
+    drainTestTimers(harness.timers);
+    await flushBootstrapMicrotasks();
+
+    firstSocket?.emit("close", {
+      code: 4000,
+      reason: "heartbeat-timeout",
+    });
+    drainTestTimers(harness.timers);
+    await flushBootstrapMicrotasks();
+
+    const secondSocket = TestWebSocket.latest;
+    expect(secondSocket).not.toBe(firstSocket);
+
+    harness.openSocket();
+    await flushBootstrapMicrotasks();
+    drainTestTimers(harness.timers);
+    await flushBootstrapMicrotasks();
+
+    const navigateMessages = harness.dispatchedMessages.filter(
+      (message) =>
+        JSON.stringify(message) ===
+        JSON.stringify({
+          type: "navigate-to-route",
+          path: "/local/thr_123",
+        }),
+    );
+    const resumeRequests = harness.dispatchedMessages.filter(
+      (message) =>
+        JSON.stringify(message) ===
+        JSON.stringify({
+          type: "thread-stream-resume-request",
+          hostId: "local",
+          conversationId: "thr_123",
+        }),
+    );
+
+    expect(navigateMessages).toHaveLength(2);
+    expect(resumeRequests).toHaveLength(2);
+    expect(harness.getSentEnvelopes()).toContainEqual({
+      type: "bridge_message",
+      message: {
+        type: "ready",
+      },
+    });
   });
 
   it("does not dispatch thread restore messages without a thread query param", async () => {

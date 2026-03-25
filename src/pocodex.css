@@ -134,6 +134,7 @@ html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] {
   color: var(--pocodex-text);
   box-shadow: var(--pocodex-shadow);
   backdrop-filter: blur(14px);
+  pointer-events: auto;
 }
 
 html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] strong {
@@ -149,6 +150,46 @@ html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] p {
   color: var(--pocodex-text-secondary);
   font-size: var(--text-base, 13px);
   line-height: 1.45;
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-actions] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-actions] button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--pocodex-button-border);
+  border-radius: 999px;
+  background: var(--pocodex-button-secondary-bg);
+  color: var(--pocodex-text);
+  font: inherit;
+  font-size: var(--text-base, 13px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-actions] button:hover {
+  background: var(--pocodex-button-secondary-hover);
+}
+
+html[data-pocodex="true"]
+  #pocodex-status-host
+  [data-pocodex-status-actions]
+  button[data-pocodex-status-style="primary"] {
+  background: var(--pocodex-button-primary-bg);
+  color: var(--pocodex-button-primary-fg);
+  border-color: transparent;
+}
+
+html[data-pocodex="true"]
+  #pocodex-status-host
+  [data-pocodex-status-actions]
+  button[data-pocodex-status-style="primary"]:hover {
+  background: var(--pocodex-button-primary-hover);
 }
 
 html[data-pocodex="true"] #pocodex-workspace-root-picker-host {

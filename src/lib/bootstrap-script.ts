@@ -17,8 +17,16 @@ export function renderBootstrapScript(config: BootstrapScriptConfig): string {
 }
 
 function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
+  type ConnectionStatusAction = {
+    id: "reconnect" | "reload";
+    label: string;
+    style?: "primary" | "secondary";
+    onClick: () => void;
+  };
+
   type ConnectionStatusOptions = {
     mode?: string;
+    actions?: ConnectionStatusAction[];
   };
 
   type ConnectionPhase = "connected" | "degraded" | "reconnecting" | "reload-required";
@@ -109,6 +117,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   let heartbeatMonitorTimer: number | null = null;
   let lastServerHeartbeatAt = 0;
   let wakeGraceDeadline = 0;
+  let pendingManualReconnect = false;
   let hasScheduledInitialThreadRestore = false;
   let sidebarModeFromHost: SidebarMode | null = null;
   let hasReceivedSidebarModeSync = false;
@@ -302,6 +311,26 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     body.textContent = message;
 
     card.append(title, body);
+
+    if (options.actions && options.actions.length > 0) {
+      const actions = document.createElement("div");
+      actions.dataset.pocodexStatusActions = "true";
+
+      for (const action of options.actions) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = action.label;
+        button.dataset.pocodexStatusAction = action.id;
+        button.dataset.pocodexStatusStyle = action.style ?? "secondary";
+        button.addEventListener("click", () => {
+          action.onClick();
+        });
+        actions.appendChild(button);
+      }
+
+      card.appendChild(actions);
+    }
+
     statusHost.appendChild(card);
   }
 
@@ -322,7 +351,33 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return;
     }
 
-    setConnectionStatus(message, options);
+    setConnectionStatus(message, {
+      ...options,
+      actions: options.actions ?? buildConnectionStatusActions(phase),
+    });
+  }
+
+  function buildConnectionStatusActions(phase: ConnectionPhase): ConnectionStatusAction[] {
+    if (phase === "connected") {
+      return [];
+    }
+
+    const reconnectAction: ConnectionStatusAction | null = isClosing
+      ? null
+      : {
+          id: "reconnect",
+          label: phase === "reload-required" ? "Retry connection" : "Reconnect now",
+          style: phase === "reload-required" ? "secondary" : "primary",
+          onClick: reconnectNow,
+        };
+    const reloadAction: ConnectionStatusAction = {
+      id: "reload",
+      label: "Reload app",
+      style: phase === "reload-required" || reconnectAction === null ? "primary" : "secondary",
+      onClick: reloadCurrentPage,
+    };
+
+    return reconnectAction ? [reconnectAction, reloadAction] : [reloadAction];
   }
 
   function installMobileSidebarThreadNavigationClose(): void {
@@ -1791,6 +1846,19 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     hasScheduledInitialThreadRestore = true;
+    scheduleThreadRestore(conversationId);
+  }
+
+  function scheduleThreadRestoreFromUrl(): void {
+    const conversationId = readThreadQueryConversationId();
+    if (!conversationId) {
+      return;
+    }
+
+    scheduleThreadRestore(conversationId);
+  }
+
+  function scheduleThreadRestore(conversationId: string): void {
     window.setTimeout(() => {
       dispatchHostMessage({
         type: "navigate-to-route",
@@ -1802,6 +1870,16 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         conversationId,
       });
     }, 0);
+  }
+
+  function replayHostBootstrapAfterReconnect(): void {
+    sendEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "ready",
+      },
+    });
+    scheduleThreadRestoreFromUrl();
   }
 
   function getStoredToken(): string {
@@ -1998,11 +2076,40 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function noteHealthyConnection(): void {
+    pendingManualReconnect = false;
     reconnectAttempt = 0;
     lastServerHeartbeatAt = Date.now();
     setConnectionPhase("connected");
     clearReconnectTimer();
     startHeartbeatMonitor();
+  }
+
+  function reconnectNow(): void {
+    if (isClosing) {
+      return;
+    }
+
+    clearReconnectTimer();
+    clearHeartbeatMonitor();
+
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
+      pendingManualReconnect = true;
+      setConnectionPhase("reconnecting", "Reconnecting to Pocodex...", {
+        mode: "passive",
+      });
+      socket.close(4000, "manual-reconnect");
+      return;
+    }
+
+    scheduleReconnect("Reconnecting to Pocodex...", {
+      immediate: true,
+      passive: true,
+      suppressEscalation: true,
+    });
+  }
+
+  function reloadCurrentPage(): void {
+    window.location.reload();
   }
 
   function noteServerHeartbeat(sentAt: number): void {
@@ -2131,6 +2238,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     enterWakeGracePeriod();
     socket = new WebSocket(getSocketUrl(token));
     socket.addEventListener("open", () => {
+      const isReconnectOpen = hasConnected;
       isConnecting = false;
       hasConnected = true;
       noteHealthyConnection();
@@ -2138,6 +2246,9 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       publishFocusState();
       for (const workerName of workerSubscribers.keys()) {
         sendEnvelope({ type: "worker_subscribe", workerName });
+      }
+      if (isReconnectOpen) {
+        replayHostBootstrapAfterReconnect();
       }
     });
 
@@ -2201,6 +2312,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     });
 
     socket.addEventListener("close", (event) => {
+      const isManualReconnect = pendingManualReconnect || event.reason === "manual-reconnect";
+      if (isManualReconnect) {
+        pendingManualReconnect = false;
+      }
       const shouldReconnect = !isClosing;
       socket = null;
       isConnecting = false;
@@ -2208,13 +2323,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       if (!shouldReconnect) {
         return;
       }
-      const message = describeReconnectReason(event);
-      if (isDocumentVisible() && isNetworkOnline()) {
-        showNotice(message);
-      }
+      const message = isManualReconnect
+        ? "Reconnecting to Pocodex..."
+        : describeReconnectReason(event);
       scheduleReconnect(message, {
+        immediate: isManualReconnect,
         passive: true,
-        suppressEscalation: !isDocumentVisible() || !isNetworkOnline() || isWakeGraceActive(),
+        suppressEscalation:
+          isManualReconnect || !isDocumentVisible() || !isNetworkOnline() || isWakeGraceActive(),
       });
     });
   }
