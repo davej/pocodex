@@ -86,6 +86,7 @@ export class DefaultCodexDesktopGitWorkerBridge
     const request = parseGitWorkerRequest(message);
     if (request) {
       this.pendingRequests.set(String(request.id), request);
+      console.error(`[git-worker] request: ${request.method}`);
     } else {
       const cancellation = parseGitWorkerCancel(message);
       if (cancellation) {

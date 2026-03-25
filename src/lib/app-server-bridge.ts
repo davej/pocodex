@@ -833,11 +833,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
       if (message.url.startsWith("vscode://codex/")) {
         const body = parseJsonBody(message.body);
+        console.error(`[codex-fetch] ${message.url}`);
         const handled = await this.handleCodexFetchRequest(message.url, body);
         if (handled) {
           this.emitFetchSuccess(message.requestId, handled.body, handled.status);
           return;
         }
+        console.error(`[codex-fetch] unsupported ${message.url}`);
         this.emitFetchError(
           message.requestId,
           501,
@@ -1294,6 +1296,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return {
           status: 200,
           body: await checkoutGitBranch(body),
+        };
+      case "git-push":
+        return {
+          status: 200,
+          body: await pushGitBranch(body),
         };
       default:
         {
@@ -1924,34 +1931,73 @@ async function generateCommitMessage(body: unknown): Promise<{
   }
 
   const prompt = isJsonRecord(body) && typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const promptFiles = extractPromptDiffFiles(prompt);
   const repository = await resolveGitRepository(cwd, new Map());
   const repoCwd = repository?.root ?? cwd;
-  const stagedFilesResult = await execGitCommand(repoCwd, [
-    "diff",
-    "--cached",
-    "--name-only",
-    "--diff-filter=ACDMRTUXB",
-  ]);
-  const stagedFiles = stagedFilesResult.success
-    ? stagedFilesResult.stdout
-        .split(/\r?\n/)
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0)
-    : [];
+  const changedFiles =
+    promptFiles.length > 0
+      ? promptFiles
+      : await readGitChangedFiles(repoCwd, [
+          "diff",
+          "--cached",
+          "--name-only",
+          "--diff-filter=ACDMRTUXB",
+        ]);
 
-  if (stagedFiles.length === 0) {
+  if (changedFiles.length === 0) {
     return {
       message: null,
     };
   }
 
-  const type = inferCommitType(prompt, stagedFiles);
-  const scope = inferCommitScope(prompt, stagedFiles);
-  const summary = inferCommitSummary(prompt, stagedFiles);
+  const type = inferCommitType(prompt, changedFiles);
+  const scope = inferCommitScope(prompt, changedFiles);
+  const summary = inferCommitSummary(prompt, changedFiles);
 
   return {
     message: scope.length > 0 ? `${type}(${scope}): ${summary}` : `${type}: ${summary}`,
   };
+}
+
+async function readGitChangedFiles(cwd: string, args: string[]): Promise<string[]> {
+  const result = await execGitCommand(cwd, args);
+  if (!result.success) {
+    return [];
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function extractPromptDiffFiles(prompt: string): string[] {
+  if (prompt.length === 0) {
+    return [];
+  }
+
+  const files = new Set<string>();
+  for (const rawLine of prompt.split(/\r?\n/)) {
+    const line = rawLine.trim();
+
+    const diffMatch = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (diffMatch) {
+      files.add(diffMatch[2]);
+      continue;
+    }
+
+    const addedFileMatch = /^\+\+\+ b\/(.+)$/.exec(line);
+    if (addedFileMatch) {
+      files.add(addedFileMatch[1]);
+      continue;
+    }
+
+    const renamedFileMatch = /^rename to (.+)$/.exec(line);
+    if (renamedFileMatch) {
+      files.add(renamedFileMatch[1]);
+    }
+  }
+
+  return [...files];
 }
 
 function inferCommitType(prompt: string, stagedFiles: string[]): string {
@@ -2330,6 +2376,101 @@ async function checkoutGitBranch(body: unknown): Promise<{
   };
 }
 
+async function pushGitBranch(body: unknown): Promise<{
+  status: "success" | "error";
+  remote?: string;
+  branch?: string;
+  error?: string;
+  errorType?: string;
+  execOutput?: {
+    command: string;
+    output: string;
+  };
+}> {
+  const params = isJsonRecord(body) && isJsonRecord(body.params) ? body.params : body;
+  const cwd = isJsonRecord(params) && typeof params.cwd === "string" ? params.cwd.trim() : "";
+  if (cwd.length === 0) {
+    return {
+      status: "error",
+      error: "No workspace available for push",
+      errorType: "unknown",
+    };
+  }
+
+  const repository = await resolveGitRepository(cwd, new Map());
+  if (!repository) {
+    return {
+      status: "error",
+      error: "No git repository found for push",
+      errorType: "unknown",
+    };
+  }
+
+  const repoCwd = repository.root;
+  const currentBranch = await resolveCurrentGitBranch(repoCwd);
+  if (currentBranch == null) {
+    return {
+      status: "error",
+      error: "Cannot push from a detached HEAD",
+      errorType: "detached-head",
+    };
+  }
+
+  const requestedBranch = firstString(
+    readStringFields(params, ["branch", "branchName", "remoteBranch", "targetBranch"]),
+  );
+  const requestedRemote = firstString(
+    readStringFields(params, ["remote", "remoteName", "origin", "originName"]),
+  );
+  const force = readBooleanField(params, ["force", "forcePush"], false);
+
+  const configuredRemote = await resolveConfiguredBranchRemote(repoCwd, currentBranch);
+  const configuredRemoteBranch = await resolveConfiguredBranchMerge(repoCwd, currentBranch);
+  const fallbackRemote = await resolveFirstGitRemote(repoCwd);
+
+  const remote = requestedRemote ?? configuredRemote ?? fallbackRemote;
+  if (remote == null) {
+    return {
+      status: "error",
+      error: "No git remote configured for push",
+      errorType: "missing-remote",
+    };
+  }
+
+  const branch = requestedBranch ?? configuredRemoteBranch ?? currentBranch;
+  const needsSetUpstream =
+    requestedRemote != null ||
+    requestedBranch != null ||
+    configuredRemote == null ||
+    configuredRemoteBranch == null;
+
+  const args = ["push"];
+  if (force) {
+    args.push("--force");
+  }
+  if (needsSetUpstream) {
+    args.push("--set-upstream");
+  }
+  args.push(remote, `HEAD:refs/heads/${branch}`);
+
+  const pushResult = await execGitCommand(repoCwd, args);
+  if (pushResult.success) {
+    return {
+      status: "success",
+      remote,
+      branch,
+    };
+  }
+
+  const error = pushResult.stderr || pushResult.stdout || "Failed to push";
+  return {
+    status: "error",
+    error,
+    errorType: classifyPushError(error),
+    execOutput: buildGitExecOutput(pushResult),
+  };
+}
+
 async function runGitCommand(cwd: string, args: string[]): Promise<string> {
   const result = await execGitCommand(cwd, args);
   if (!result.success) {
@@ -2512,6 +2653,89 @@ function uniqueStrings(values: unknown[]): string[] {
     normalized.push(trimmed);
   }
   return normalized;
+}
+
+function readStringFields(value: unknown, fieldNames: string[]): string[] {
+  if (!isJsonRecord(value)) {
+    return [];
+  }
+  return uniqueStrings(fieldNames.map((fieldName) => value[fieldName]));
+}
+
+function firstString(values: string[]): string | null {
+  return values.length > 0 ? values[0] : null;
+}
+
+function readBooleanField(value: unknown, fieldNames: string[], fallback: boolean): boolean {
+  if (!isJsonRecord(value)) {
+    return fallback;
+  }
+  for (const fieldName of fieldNames) {
+    if (typeof value[fieldName] === "boolean") {
+      return value[fieldName];
+    }
+  }
+  return fallback;
+}
+
+async function resolveCurrentGitBranch(cwd: string): Promise<string | null> {
+  const branchResult = await execGitCommand(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!branchResult.success || branchResult.stdout.length === 0) {
+    return null;
+  }
+  return branchResult.stdout;
+}
+
+async function resolveConfiguredBranchRemote(cwd: string, branch: string): Promise<string | null> {
+  const remoteResult = await execGitCommand(cwd, ["config", "--get", `branch.${branch}.remote`]);
+  if (!remoteResult.success || remoteResult.stdout.length === 0) {
+    return null;
+  }
+  return remoteResult.stdout;
+}
+
+async function resolveConfiguredBranchMerge(cwd: string, branch: string): Promise<string | null> {
+  const mergeResult = await execGitCommand(cwd, ["config", "--get", `branch.${branch}.merge`]);
+  if (!mergeResult.success || mergeResult.stdout.length === 0) {
+    return null;
+  }
+
+  const mergeRef = mergeResult.stdout;
+  if (mergeRef.startsWith("refs/heads/")) {
+    return mergeRef.slice("refs/heads/".length);
+  }
+  return mergeRef;
+}
+
+async function resolveFirstGitRemote(cwd: string): Promise<string | null> {
+  const remoteResult = await execGitCommand(cwd, ["remote"]);
+  if (!remoteResult.success || remoteResult.stdout.length === 0) {
+    return null;
+  }
+  return (
+    remoteResult.stdout
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .find((value) => value.length > 0) ?? null
+  );
+}
+
+function classifyPushError(error: string): string {
+  const normalized = error.toLowerCase();
+  if (normalized.includes("non-fast-forward") || normalized.includes("[rejected]")) {
+    return "non-fast-forward";
+  }
+  if (
+    normalized.includes("permission denied") ||
+    normalized.includes("could not read from remote repository") ||
+    normalized.includes("authentication failed")
+  ) {
+    return "authentication";
+  }
+  if (normalized.includes("has no upstream branch")) {
+    return "missing-upstream";
+  }
+  return "unknown";
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
