@@ -8,6 +8,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { AppServerBridge } from "./lib/app-server-bridge.js";
+import { normalizeCliArgv } from "./lib/cli-args.js";
 import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
 import { renderBootstrapScript } from "./lib/bootstrap-script.js";
 import { patchIndexHtml } from "./lib/html-patcher.js";
@@ -28,7 +29,7 @@ const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--listen", "--token"]);
 const BOOLEAN_FLAG_NAMES = new Set(["--dev"]);
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+  const argv = normalizeCliArgv(process.argv.slice(2));
   const command = argv[0];
 
   if (command === "help" || command === "--help" || command === "-h") {

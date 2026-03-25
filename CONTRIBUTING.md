@@ -14,10 +14,16 @@ Install dependencies:
 pnpm install
 ```
 
-Run Pocodex directly from source:
+Run Pocodex directly from source with live CSS reloads and without interrupting the active Codex session:
 
 ```bash
 pnpm run dev
+```
+
+If you want automatic restart on TypeScript changes, use the explicit watcher:
+
+```bash
+pnpm run dev:watch
 ```
 
 Or build first and run the compiled CLI:
@@ -26,8 +32,6 @@ Or build first and run the compiled CLI:
 pnpm run build
 node dist/cli.js
 ```
-
-If you want live stylesheet reloads while editing `src/pocodex.css`, add `--dev`.
 
 If you are running from WSL, `pnpm run dev -- --app 'C:\Program Files\WindowsApps\OpenAI.Codex_...\app'` works, and so does the equivalent `/mnt/c/...` path.
 
@@ -55,7 +59,7 @@ POCODEX_DEBUG=1 pnpm run dev
 For UI work, start with:
 
 ```bash
-pnpm run dev -- --dev
+pnpm run dev
 ```
 
 Then edit `src/pocodex.css`. Pocodex watches that file and notifies the active browser session to swap in the new stylesheet without restarting the server.
