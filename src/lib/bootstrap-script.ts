@@ -120,6 +120,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   let sidebarModeInteractionTimer: number | null = null;
   let pendingSidebarModeTarget: SidebarMode | null = null;
   let pendingSidebarModeTargetUntil = 0;
+  let settingsShellObserver: MutationObserver | null = null;
   let workspaceRootPickerState: WorkspaceRootPickerState | null = null;
 
   toastHost.id = "pocodex-toast-host";
@@ -128,12 +129,15 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   workspaceRootPickerHost.hidden = true;
   document.documentElement.dataset.pocodex = "true";
   normalizeBrowserUrlForRefresh();
+  syncRouteDataset();
 
   runWhenDocumentReady(() => {
     ensureStylesheetLink(config.stylesheetHref);
     ensureHostAttached(toastHost);
     ensureHostAttached(statusHost);
     ensureHostAttached(workspaceRootPickerHost);
+    installRouteDatasetSync();
+    installSettingsShellObserver();
     startOpenInAppObserver();
     installNewThreadNavigationSync();
     installLocalAttachmentPickerInterception();
@@ -334,12 +338,80 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     scheduleSidebarModeReconcile(20);
   }
 
+  function installRouteDatasetSync(): void {
+    syncRouteDataset();
+
+    const historyObject = window.history as History & {
+      __pocodexRouteSyncInstalled?: boolean;
+    };
+    if (historyObject.__pocodexRouteSyncInstalled) {
+      return;
+    }
+
+    historyObject.__pocodexRouteSyncInstalled = true;
+
+    const wrapHistoryMethod = (methodName: "pushState" | "replaceState"): void => {
+      const original = historyObject[methodName];
+      if (typeof original !== "function") {
+        return;
+      }
+
+      historyObject[methodName] = ((data: unknown, unused: string, url?: string | URL | null) => {
+        original.call(window.history, data, unused, url);
+        syncRouteDataset();
+      }) as History[typeof methodName];
+    };
+
+    wrapHistoryMethod("pushState");
+    wrapHistoryMethod("replaceState");
+    window.addEventListener("popstate", syncRouteDataset);
+    window.addEventListener("hashchange", syncRouteDataset);
+  }
+
   function installNewThreadNavigationSync(): void {
     document.addEventListener("click", handleNewThreadTriggerClick, true);
   }
 
   function installLocalAttachmentPickerInterception(): void {
     document.addEventListener("click", handleLocalAttachmentPickerClick, true);
+  }
+
+  function installSettingsShellObserver(): void {
+    syncSettingsShellPresence();
+
+    if (settingsShellObserver || typeof MutationObserver !== "function") {
+      return;
+    }
+
+    const target = document.body ?? document.documentElement;
+    settingsShellObserver = new MutationObserver(() => {
+      syncSettingsShellPresence();
+    });
+    settingsShellObserver.observe(target, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  function syncRouteDataset(): void {
+    document.documentElement.dataset.pocodexRoute = readCurrentPathname();
+  }
+
+  function readCurrentPathname(): string {
+    try {
+      return new URL(window.location.href).pathname;
+    } catch {
+      return "/";
+    }
+  }
+
+  function syncSettingsShellPresence(): void {
+    const hasSettingsShell = document.querySelector('nav[aria-label="Settings"]') !== null;
+    if (hasSettingsShell) {
+      document.documentElement.dataset.pocodexSettingsShell = "true";
+    } else {
+      delete document.documentElement.dataset.pocodexSettingsShell;
+    }
   }
 
   function handleSidebarClick(event: MouseEvent): void {

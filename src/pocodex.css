@@ -471,6 +471,72 @@ html[data-pocodex="true"] [aria-label="Open in Popout Window"] {
     width: 100%;
   }
 
+  /*
+   * The compact settings shell shifts the content pane right when the sidebar
+   * is open. On phones that leaves the actual settings form squeezed into a
+   * narrow strip, so let the menu overlay instead and allow form controls to
+   * expand to the available width.
+   */
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .window-fx-sidebar-surface.w-token-sidebar,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .window-fx-sidebar-surface.w-token-sidebar {
+    width: clamp(10rem, 42vw, 12rem);
+    max-width: calc(100vw - 104px);
+    border-inline-end: 1px solid var(--pocodex-border);
+    box-shadow: var(--pocodex-shadow);
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .pt-toolbar.main-surface.left-token-sidebar,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .pt-toolbar.main-surface.left-token-sidebar {
+    left: 0 !important;
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .mx-auto.flex.w-full.flex-col
+    > .flex.items-center.justify-between.gap-3.pb-panel,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .mx-auto.flex.w-full.flex-col
+    > .flex.items-center.justify-between.gap-3.pb-panel,
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3 {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3
+    > .flex.shrink-0.items-center.gap-2,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3
+    > .flex.shrink-0.items-center.gap-2 {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[320px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[260px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[240px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[220px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class~="max-w-xs"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[320px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[260px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[240px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[220px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class~="max-w-xs"] {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
   #app-header-portal-main button {
     text-indent: -10000px;
   }

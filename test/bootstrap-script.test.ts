@@ -858,6 +858,56 @@ describe("renderBootstrapScript", () => {
     ]);
   });
 
+  it("tracks the current route on the document element", () => {
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/settings/general-settings?token=secret",
+    });
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    harness.run(script);
+
+    expect(harness.document.documentElement.dataset.pocodexRoute).toBe(
+      "/settings/general-settings",
+    );
+
+    harness.windowObject.history.pushState(null, "", "/settings/agent");
+    expect(harness.document.documentElement.dataset.pocodexRoute).toBe("/settings/agent");
+
+    harness.windowObject.history.replaceState(null, "", "/");
+    expect(harness.document.documentElement.dataset.pocodexRoute).toBe("/");
+  });
+
+  it("marks the document when the settings shell is present", () => {
+    const harness = createBootstrapHarness();
+    const settingsNav = harness.document.createElement("nav");
+    settingsNav.setAttribute("aria-label", "Settings");
+    harness.document.body.appendChild(settingsNav);
+
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    harness.run(script);
+
+    expect(harness.document.documentElement.dataset.pocodexSettingsShell).toBe("true");
+  });
+
   it("persists the session token for standalone launches without a token query", () => {
     const script = renderBootstrapScript({
       sentryOptions: {
