@@ -1225,10 +1225,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "gh-cli-status":
         return {
           status: 200,
-          body: {
-            isInstalled: false,
-            isAuthenticated: false,
-          },
+          body: await resolveGhCliStatus(),
         };
       case "gh-pr-status":
         return {
@@ -2477,6 +2474,52 @@ async function runGitCommand(cwd: string, args: string[]): Promise<string> {
     throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
   }
   return result.stdout;
+}
+
+async function resolveGhCliStatus(): Promise<{
+  isInstalled: boolean;
+  isAuthenticated: boolean;
+}> {
+  return new Promise((resolveStatus) => {
+    execFile(
+      "gh",
+      ["auth", "status"],
+      {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolveStatus({
+            isInstalled: true,
+            isAuthenticated: true,
+          });
+          return;
+        }
+
+        const commandError = error as NodeJS.ErrnoException;
+        if (commandError.code === "ENOENT") {
+          resolveStatus({
+            isInstalled: false,
+            isAuthenticated: false,
+          });
+          return;
+        }
+
+        const output = `${stdout}\n${stderr}`.toLowerCase();
+        const isAuthFailure =
+          output.includes("not logged into") ||
+          output.includes("run gh auth login") ||
+          output.includes("authentication failed") ||
+          output.includes("no oauth token");
+
+        resolveStatus({
+          isInstalled: true,
+          isAuthenticated: !isAuthFailure && commandError.code == null ? true : false,
+        });
+      },
+    );
+  });
 }
 
 async function execGitCommand(
