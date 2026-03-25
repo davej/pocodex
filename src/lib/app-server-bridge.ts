@@ -834,8 +834,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       if (message.url.startsWith("vscode://codex/")) {
         const body = parseJsonBody(message.body);
         console.error(`[codex-fetch] ${message.url}`);
-        const handled = await this.handleCodexFetchRequest(message.url, body);
+        let handled;
+        try {
+          handled = await this.handleCodexFetchRequest(message.url, body);
+        } catch (error) {
+          console.error(
+            `[codex-fetch] exception ${message.url}: ${extractJsonRpcErrorMessage(error)}`,
+          );
+          throw error;
+        }
         if (handled) {
+          if (shouldLogCodexFetchFailure(handled.status, handled.body)) {
+            console.error(
+              `[codex-fetch] failed ${message.url}: ${summarizeCodexFetchBody(handled.body)}`,
+            );
+          }
           this.emitFetchSuccess(message.requestId, handled.body, handled.status);
           return;
         }
@@ -1239,6 +1252,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
             url: null,
           },
         };
+      case "gh-pr-create":
+        return {
+          status: 200,
+          body: await createPullRequest(body),
+        };
       case "ide-context":
         return {
           status: 200,
@@ -1350,10 +1368,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "generate-pull-request-message":
         return {
           status: 200,
-          body: {
-            title: null,
-            body: null,
-          },
+          body: await generatePullRequestMessage(body),
         };
       case "git-merge-base":
         return {
@@ -1956,6 +1971,61 @@ async function generateCommitMessage(body: unknown): Promise<{
   };
 }
 
+async function generatePullRequestMessage(body: unknown): Promise<{
+  title: string | null;
+  body: string | null;
+}> {
+  const cwd = isJsonRecord(body) && typeof body.cwd === "string" ? body.cwd.trim() : "";
+  if (cwd.length === 0) {
+    return {
+      title: null,
+      body: null,
+    };
+  }
+
+  const prompt = isJsonRecord(body) && typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const promptFiles = extractPromptDiffFiles(prompt);
+  const repository = await resolveGitRepository(cwd, new Map());
+  const repoCwd = repository?.root ?? cwd;
+  const changedFiles =
+    promptFiles.length > 0
+      ? promptFiles
+      : await readGitChangedFiles(repoCwd, [
+          "diff",
+          "--cached",
+          "--name-only",
+          "--diff-filter=ACDMRTUXB",
+        ]);
+
+  const fallbackTitle = await inferPullRequestFallbackTitle(repoCwd);
+  if (changedFiles.length === 0) {
+    if (fallbackTitle == null) {
+      return {
+        title: null,
+        body: null,
+      };
+    }
+    return {
+      title: fallbackTitle,
+      body: inferPullRequestFallbackBody(fallbackTitle),
+    };
+  }
+
+  const title = inferPullRequestTitle(prompt, changedFiles) || fallbackTitle;
+  if (title == null) {
+    return {
+      title: null,
+      body: null,
+    };
+  }
+  const bodyText = inferPullRequestBody(prompt, changedFiles, title);
+
+  return {
+    title,
+    body: bodyText,
+  };
+}
+
 async function readGitChangedFiles(cwd: string, args: string[]): Promise<string[]> {
   const result = await execGitCommand(cwd, args);
   if (!result.success) {
@@ -1995,6 +2065,82 @@ function extractPromptDiffFiles(prompt: string): string[] {
   }
 
   return [...files];
+}
+
+function inferPullRequestTitle(prompt: string, changedFiles: string[]): string {
+  const combined = `${prompt}\n${changedFiles.join("\n")}`.toLowerCase();
+  if (/\b(push|pull request|pr)\b/.test(combined) && /\bgit\b/.test(combined)) {
+    return "Improve desktop git and pull request flows";
+  }
+  if (/\b(worktree)\b/.test(combined) && /\bgit\b/.test(combined)) {
+    return "Improve desktop git worktree flows";
+  }
+  if (/\b(branch|commit|git)\b/.test(combined)) {
+    return "Improve desktop git flows";
+  }
+  if (changedFiles.every(isDocumentationFile)) {
+    return "Update documentation";
+  }
+  if (changedFiles.every(isTestFile)) {
+    return "Update tests";
+  }
+  if (changedFiles.every(isCiFile)) {
+    return "Update CI configuration";
+  }
+  if (changedFiles.every(isBuildFile)) {
+    return "Update build configuration";
+  }
+  if (changedFiles.length === 1) {
+    return `Update ${normalizeCommitToken(stripFileExtension(lastPathComponent(changedFiles[0]))).replace(/-/g, " ")}`;
+  }
+  return `Update ${changedFiles.length} files`;
+}
+
+async function inferPullRequestFallbackTitle(cwd: string): Promise<string | null> {
+  const subjectResult = await execGitCommand(cwd, ["log", "-1", "--pretty=%s"]);
+  const subject = subjectResult.success ? subjectResult.stdout.trim() : "";
+  if (subject.length > 0) {
+    return humanizeConventionalTitle(subject);
+  }
+
+  const branch = await resolveCurrentGitBranch(cwd);
+  if (branch == null || branch.length === 0) {
+    return null;
+  }
+
+  return humanizeBranchName(branch);
+}
+
+function inferPullRequestBody(prompt: string, changedFiles: string[], title: string): string {
+  const lines = ["## Summary", `- ${title}`];
+
+  const listedFiles = changedFiles.slice(0, 3);
+  for (const file of listedFiles) {
+    lines.push(`- Update ${file}`);
+  }
+  if (changedFiles.length > listedFiles.length) {
+    lines.push(`- Update ${changedFiles.length - listedFiles.length} additional files`);
+  }
+
+  const normalizedPrompt = prompt.trim();
+  if (normalizedPrompt.length > 0) {
+    const promptSummary = firstNonEmptySentence(normalizedPrompt);
+    if (promptSummary && !title.toLowerCase().includes(promptSummary.toLowerCase())) {
+      lines.push("");
+      lines.push("## Context");
+      lines.push(`- ${promptSummary}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("## Testing");
+  lines.push("- Not run");
+
+  return lines.join("\n");
+}
+
+function inferPullRequestFallbackBody(title: string): string {
+  return ["## Summary", `- ${title}`, "", "## Testing", "- Not run"].join("\n");
 }
 
 function inferCommitType(prompt: string, stagedFiles: string[]): string {
@@ -2522,6 +2668,79 @@ async function resolveGhCliStatus(): Promise<{
   });
 }
 
+async function createPullRequest(body: unknown): Promise<{
+  status: "success" | "error";
+  url?: string | null;
+  error?: string;
+  execOutput?: {
+    command: string;
+    output: string;
+  };
+}> {
+  const params = isJsonRecord(body) && isJsonRecord(body.params) ? body.params : body;
+  const cwd = isJsonRecord(params) && typeof params.cwd === "string" ? params.cwd.trim() : "";
+  const headBranch =
+    isJsonRecord(params) && typeof params.headBranch === "string" ? params.headBranch.trim() : "";
+  const baseBranch =
+    isJsonRecord(params) && typeof params.baseBranch === "string" ? params.baseBranch.trim() : "";
+  const title =
+    isJsonRecord(params) && typeof params.titleOverride === "string"
+      ? params.titleOverride.trim()
+      : "";
+  const bodyText =
+    isJsonRecord(params) && typeof params.bodyOverride === "string"
+      ? params.bodyOverride.trim()
+      : "";
+  const isDraft =
+    isJsonRecord(params) && typeof params.isDraft === "boolean" ? params.isDraft : false;
+
+  if (cwd.length === 0) {
+    return {
+      status: "error",
+      error: "No workspace available for pull request creation",
+    };
+  }
+  if (headBranch.length === 0) {
+    return {
+      status: "error",
+      error: "Head branch is required",
+    };
+  }
+  if (title.length === 0) {
+    return {
+      status: "error",
+      error: "Pull request title is required",
+    };
+  }
+
+  const args = ["pr", "create", "--head", headBranch, "--title", title];
+  if (baseBranch.length > 0) {
+    args.push("--base", baseBranch);
+  }
+  if (isDraft) {
+    args.push("--draft");
+  }
+  args.push("--body", bodyText);
+
+  const result = await execGhCommand(cwd, args);
+  if (!result.success) {
+    return {
+      status: "error",
+      error: result.stderr || result.stdout || "Failed to create pull request",
+      execOutput: {
+        command: result.command,
+        output: result.stderr || result.stdout || "Failed to create pull request",
+      },
+    };
+  }
+
+  const output = `${result.stdout}\n${result.stderr}`.trim();
+  return {
+    status: "success",
+    url: extractFirstUrl(output),
+  };
+}
+
 async function execGitCommand(
   cwd: string,
   args: string[],
@@ -2552,6 +2771,45 @@ async function execGitCommand(
         }
         resolveResult({
           command: ["git", ...args].join(" "),
+          success: true,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        });
+      },
+    );
+  });
+}
+
+async function execGhCommand(
+  cwd: string,
+  args: string[],
+): Promise<{
+  command: string;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}> {
+  return new Promise((resolveResult) => {
+    execFile(
+      "gh",
+      args,
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          resolveResult({
+            command: ["gh", ...args].join(" "),
+            success: false,
+            stdout: stdout.trim(),
+            stderr: stderr.trim(),
+          });
+          return;
+        }
+        resolveResult({
+          command: ["gh", ...args].join(" "),
           success: true,
           stdout: stdout.trim(),
           stderr: stderr.trim(),
@@ -2624,6 +2882,69 @@ function extractJsonRpcErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function extractFirstUrl(value: string): string | null {
+  const match = value.match(/https?:\/\/\S+/);
+  return match ? match[0] : null;
+}
+
+function shouldLogCodexFetchFailure(status: number, body: unknown): boolean {
+  if (status >= 400) {
+    return true;
+  }
+  if (!isJsonRecord(body)) {
+    return false;
+  }
+  return body.status === "error" || body.type === "error" || body.success === false;
+}
+
+function summarizeCodexFetchBody(body: unknown): string {
+  if (typeof body === "string") {
+    return body;
+  }
+
+  try {
+    const serialized = JSON.stringify(body);
+    return serialized.length > 4000 ? `${serialized.slice(0, 3997)}...` : serialized;
+  } catch {
+    return String(body);
+  }
+}
+
+function firstNonEmptySentence(value: string): string | null {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const sentence = normalized.split(/(?<=[.!?])\s+/)[0]?.trim() ?? "";
+  if (sentence.length === 0) {
+    return null;
+  }
+
+  return sentence.length > 140 ? `${sentence.slice(0, 137).trimEnd()}...` : sentence;
+}
+
+function humanizeConventionalTitle(value: string): string {
+  const normalized = value.replace(/^[a-z]+(?:\([^)]+\))?!?:\s*/i, "").trim();
+  if (normalized.length === 0) {
+    return "Update changes";
+  }
+  return uppercaseFirst(normalized);
+}
+
+function humanizeBranchName(value: string): string {
+  const branch = lastPathComponent(value);
+  const normalized = branch.replace(/[-_]+/g, " ").trim();
+  if (normalized.length === 0) {
+    return "Update changes";
+  }
+  return uppercaseFirst(normalized);
+}
+
+function uppercaseFirst(value: string): string {
+  return value.length === 0 ? value : value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function parseJsonBody(body: unknown): unknown {
