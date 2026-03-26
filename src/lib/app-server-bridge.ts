@@ -1982,6 +1982,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     if (typeof params.threadId === "string") {
       sanitized.threadId = params.threadId;
     }
+    const resumePath = readExistingAbsoluteThreadPath(params.path);
+    if (resumePath) {
+      sanitized.path = resumePath;
+    }
     if (typeof params.cwd === "string") {
       sanitized.cwd = params.cwd;
     }
@@ -2800,6 +2804,14 @@ function buildWhamUsagePayload(result: unknown): WhamUsagePayload {
     rate_limit: buildWhamRateLimitPayload(rateLimits),
     additional_rate_limits: additionalRateLimits,
   };
+}
+
+function readExistingAbsoluteThreadPath(value: unknown): string | null {
+  if (typeof value !== "string" || !isAbsolute(value) || !existsSync(value)) {
+    return null;
+  }
+
+  return value;
 }
 
 function buildEmptyWhamUsagePayload(): WhamUsagePayload {

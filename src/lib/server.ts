@@ -342,7 +342,14 @@ export class PocodexServer {
         }
         break;
       case "worker_message":
-        await this.options.relay.sendWorkerMessage(envelope.workerName, envelope.message);
+        void this.options.relay
+          .sendWorkerMessage(envelope.workerName, envelope.message)
+          .catch((error) => {
+            this.send(session.socket, {
+              type: "error",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
         break;
       case "focus_state":
         session.isFocused = envelope.isFocused;
@@ -401,6 +408,16 @@ export class PocodexServer {
 
     const rewrittenMessage = rewriteRequestIdsForHost(session.id, message);
     debugLog("server", "forwarding bridge message to relay", rewrittenMessage);
+    if (isAsyncBridgeRelayMessage(rewrittenMessage)) {
+      void this.options.relay.forwardBridgeMessage(rewrittenMessage).catch((error) => {
+        this.send(session.socket, {
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+      return;
+    }
+
     await this.options.relay.forwardBridgeMessage(rewrittenMessage);
   }
 
@@ -880,6 +897,25 @@ function readNonEmptyString(value: unknown): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+const ASYNC_BRIDGE_RELAY_MESSAGE_TYPES = new Set([
+  "fetch",
+  "cancel-fetch",
+  "fetch-stream",
+  "cancel-fetch-stream",
+  "mcp-request",
+  "mcp-response",
+  "mcp-notification",
+  "log-message",
+]);
+
+function isAsyncBridgeRelayMessage(message: unknown): boolean {
+  return (
+    isJsonRecord(message) &&
+    typeof message.type === "string" &&
+    ASYNC_BRIDGE_RELAY_MESSAGE_TYPES.has(message.type)
+  );
 }
 
 function stripInternalBridgeFields(message: JsonRecord): JsonRecord {

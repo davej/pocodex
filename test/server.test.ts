@@ -335,6 +335,129 @@ describe("PocodexServer", () => {
     first.close();
   });
 
+  it("does not block bridge messages behind worker dispatch", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    let releaseWorkerDispatch: (() => void) | null = null;
+    const workerDispatchBlocked = new Promise<void>((resolve) => {
+      releaseWorkerDispatch = resolve;
+    });
+    relay.sendWorkerMessage = async (workerName: string, message: unknown): Promise<void> => {
+      relay.workerMessages.push({ workerName, message });
+      await workerDispatchBlocked;
+    };
+
+    const socket = await connect(url, "secret");
+
+    socket.send(
+      JSON.stringify({
+        type: "worker_message",
+        workerName: "git",
+        message: {
+          type: "worker-request",
+          request: {
+            id: "worker-1",
+            method: "staged-and-unstaged-changes",
+          },
+        },
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "fetch",
+          requestId: "request-1",
+          url: "vscode://codex/thread/list",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.workerMessages.length === 1);
+    await waitForCondition(() => relay.forwardedMessages.length === 1);
+
+    expect(relay.forwardedMessages[0]).toEqual({
+      type: "fetch",
+      requestId: expect.stringMatching(/^pocodex:[^:]+:request-1$/),
+      url: "vscode://codex/thread/list",
+    });
+
+    releaseWorkerDispatch?.();
+    socket.close();
+  });
+
+  it("does not block request-like bridge messages behind relay work", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    let releaseBridgeDispatch: (() => void) | null = null;
+    const bridgeDispatchBlocked = new Promise<void>((resolve) => {
+      releaseBridgeDispatch = resolve;
+    });
+    relay.forwardBridgeMessage = async (message: unknown): Promise<void> => {
+      relay.forwardedMessages.push(message);
+      const method =
+        typeof message === "object" &&
+        message !== null &&
+        "request" in message &&
+        typeof (message as { request?: { method?: unknown } }).request?.method === "string"
+          ? (message as { request: { method: string } }).request.method
+          : typeof message === "object" &&
+              message !== null &&
+              "method" in message &&
+              typeof (message as { method?: unknown }).method === "string"
+            ? (message as { method: string }).method
+            : "";
+      if (method === "thread/list") {
+        await bridgeDispatchBlocked;
+      }
+    };
+
+    const socket = await connect(url, "secret");
+
+    socket.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "mcp-request",
+          request: {
+            id: "mcp-1",
+            method: "thread/list",
+          },
+        },
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "fetch",
+          requestId: "request-1",
+          url: "vscode://codex/thread/list",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 2);
+
+    expect(relay.forwardedMessages[0]).toEqual({
+      type: "mcp-request",
+      request: {
+        id: expect.stringMatching(/^pocodex:[^:]+:mcp-1$/),
+        method: "thread/list",
+      },
+    });
+    expect(relay.forwardedMessages[1]).toEqual({
+      type: "fetch",
+      requestId: expect.stringMatching(/^pocodex:[^:]+:request-1$/),
+      url: "vscode://codex/thread/list",
+    });
+
+    releaseBridgeDispatch?.();
+    socket.close();
+  });
+
   it("routes terminal output to all observers while enforcing a single controller", async () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);

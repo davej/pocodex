@@ -2668,6 +2668,9 @@ describe("AppServerBridge", () => {
   it("sanitizes desktop-specific thread resume params before forwarding", async () => {
     const bridge = await createBridge(children);
     const child = children.at(0);
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-thread-resume-"));
+    tempDirs.push(tempDirectory);
+    const missingThreadPath = join(tempDirectory, "missing-thread.jsonl");
 
     await bridge.forwardBridgeMessage({
       type: "mcp-request",
@@ -2680,7 +2683,7 @@ describe("AppServerBridge", () => {
           config: {
             analytics: "",
           },
-          path: "/tmp/thread.jsonl",
+          path: missingThreadPath,
           history: null,
           modelProvider: "codex_vscode_copilot",
           sandbox: "workspace-write",
@@ -2695,6 +2698,37 @@ describe("AppServerBridge", () => {
     expect(forwarded).not.toContain('"config"');
     expect(forwarded).not.toContain('"modelProvider"');
     expect(forwarded).not.toContain('"path"');
+
+    await bridge.close();
+  });
+
+  it("preserves an existing local thread resume path", async () => {
+    const bridge = await createBridge(children);
+    const child = children.at(0);
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-thread-resume-"));
+    tempDirs.push(tempDirectory);
+    const threadPath = join(tempDirectory, "thread.jsonl");
+    await writeFile(threadPath, '{"type":"thread"}\n', "utf8");
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "resume-2",
+        method: "thread/resume",
+        params: {
+          threadId: "thr_123",
+          path: threadPath,
+          cwd: TEST_WORKSPACE_ROOT,
+          modelProvider: "codex_vscode_copilot",
+        },
+      },
+    });
+
+    const forwarded = child?.writes ?? "";
+    expect(forwarded).toContain('"method":"thread/resume"');
+    expect(forwarded).toContain('"threadId":"thr_123"');
+    expect(forwarded).toContain(`"path":"${threadPath}"`);
+    expect(forwarded).not.toContain('"modelProvider"');
 
     await bridge.close();
   });
