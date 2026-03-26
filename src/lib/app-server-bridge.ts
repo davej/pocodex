@@ -14,6 +14,12 @@ import {
   type CodexDesktopGitWorkerBridge,
 } from "./codex-desktop-git-worker.js";
 import { debugLog } from "./debug.js";
+import {
+  loadLocalEnvironment,
+  listLocalEnvironments,
+  readLocalEnvironmentConfig,
+  saveLocalEnvironmentConfig,
+} from "./local-environments.js";
 import type { HostBridge, JsonRecord } from "./protocol.js";
 import {
   derivePersistedAtomRegistryPath,
@@ -1015,7 +1021,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
       if (message.url.startsWith("vscode://codex/")) {
         const body = parseJsonBody(message.body);
-        const handled = await this.handleCodexFetchRequest(message.url, body);
+        const handled = await this.handleCodexFetchRequest(
+          message.url,
+          typeof message.method === "string" ? message.method : "GET",
+          body,
+        );
         if (handled) {
           if (message.url === "vscode://codex/ide-context") {
             this.emitFetchError(
@@ -1235,11 +1245,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
   private async handleCodexFetchRequest(
     rawUrl: string,
+    method: string,
     body: unknown,
   ): Promise<{ status: number; body: unknown } | null> {
     const url = new URL(rawUrl);
     const path = url.pathname.replace(/^\/+/, "");
-
     switch (path) {
       case "get-global-state":
         return {
@@ -1340,9 +1350,22 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "local-environments":
         return {
           status: 200,
-          body: {
-            environments: [],
-          },
+          body: await this.handleLocalEnvironmentsRequest(body),
+        };
+      case "local-environment-config":
+        return {
+          status: 200,
+          body: await this.handleLocalEnvironmentConfigRequest(body),
+        };
+      case "local-environment":
+        return {
+          status: 200,
+          body: await this.handleLocalEnvironmentRequest(body),
+        };
+      case "local-environment-config-save":
+        return {
+          status: 200,
+          body: await this.handleLocalEnvironmentConfigSaveRequest(body),
         };
       case "codex-home":
         return {
@@ -1719,6 +1742,51 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         config: null,
       };
     }
+  }
+
+  private async handleLocalEnvironmentsRequest(body: unknown): Promise<unknown> {
+    const workspaceRoot =
+      readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot ?? this.cwd;
+    return await listLocalEnvironments(workspaceRoot);
+  }
+
+  private async handleLocalEnvironmentConfigRequest(body: unknown): Promise<unknown> {
+    const configPath = readLocalEnvironmentConfigPath(body);
+    if (configPath) {
+      return await readLocalEnvironmentConfig(configPath);
+    }
+
+    const workspaceRoot = readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot;
+    if (!workspaceRoot) {
+      throw new Error("Local environment workspace root is required.");
+    }
+
+    return await readLocalEnvironmentConfig(
+      join(workspaceRoot, ".codex", "environments", "environment.toml"),
+    );
+  }
+
+  private async handleLocalEnvironmentRequest(body: unknown): Promise<unknown> {
+    const configPath = readLocalEnvironmentConfigPath(body);
+    if (!configPath) {
+      throw new Error("Local environment config path is required.");
+    }
+
+    return await loadLocalEnvironment(configPath);
+  }
+
+  private async handleLocalEnvironmentConfigSaveRequest(body: unknown): Promise<unknown> {
+    const configPath = readLocalEnvironmentConfigPath(body);
+    if (!configPath) {
+      throw new Error("Local environment config path is required.");
+    }
+
+    const raw = readLocalEnvironmentRaw(body);
+    if (raw === null) {
+      throw new Error("Local environment config contents are required.");
+    }
+
+    return await saveLocalEnvironmentConfig(configPath, raw);
   }
 
   private async readCodexAgentsMarkdown(): Promise<{
@@ -2739,12 +2807,37 @@ function resolveCodexAgentsMarkdownPath(): string {
 }
 
 function readCodexAgentsMarkdownContents(body: unknown): string | null {
-  const params = isJsonRecord(body) && isJsonRecord(body.params) ? body.params : body;
+  const params = readCodexFetchParams(body);
   if (!isJsonRecord(params) || typeof params.contents !== "string") {
     return null;
   }
 
   return params.contents;
+}
+
+function readLocalEnvironmentWorkspaceRoot(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.workspaceRoot === "string"
+    ? params.workspaceRoot
+    : null;
+}
+
+function readLocalEnvironmentConfigPath(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.configPath === "string" ? params.configPath : null;
+}
+
+function readLocalEnvironmentRaw(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.raw === "string" ? params.raw : null;
+}
+
+function readCodexFetchParams(body: unknown): unknown {
+  if (!isJsonRecord(body)) {
+    return body;
+  }
+
+  return isJsonRecord(body.params) ? body.params : body;
 }
 
 function isFileNotFoundError(error: unknown): boolean {
