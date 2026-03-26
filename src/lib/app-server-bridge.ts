@@ -138,6 +138,28 @@ interface GitOriginsResponse {
   homeDir: string;
 }
 
+interface GhCliStatus {
+  isInstalled: boolean;
+  isAuthenticated: boolean;
+}
+
+interface GhPrStatus {
+  status: string;
+  hasOpenPr: boolean;
+  isDraft: boolean;
+  canMerge: boolean;
+  ciStatus: string | null;
+  url: string | null;
+}
+
+interface GhPrInfo {
+  state: string | null;
+  isDraft: boolean;
+  mergeable: string | null;
+  url: string | null;
+  statusCheckRollup: unknown;
+}
+
 type UsageVisibilityPlan = "plus" | "pro" | "prolite";
 
 interface LocalRateLimitWindowSnapshot {
@@ -1440,22 +1462,12 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "gh-cli-status":
         return {
           status: 200,
-          body: {
-            isInstalled: false,
-            isAuthenticated: false,
-          },
+          body: await this.readGhCliStatus(),
         };
       case "gh-pr-status":
         return {
           status: 200,
-          body: {
-            status: "unavailable",
-            hasOpenPr: false,
-            isDraft: false,
-            canMerge: false,
-            ciStatus: null,
-            url: null,
-          },
+          body: await this.readGhPrStatus(body),
         };
       case "ide-context":
         return {
@@ -1667,6 +1679,102 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
     return {
       plan: readUsageVisibilityPlanFromAccount(result),
+    };
+  }
+
+  private async readGhCliStatus(): Promise<GhCliStatus> {
+    const cwd = this.cwd.length > 0 ? this.cwd : process.cwd();
+    const installed = await isGhInstalled(cwd);
+    if (!installed) {
+      return {
+        isInstalled: false,
+        isAuthenticated: false,
+      };
+    }
+
+    return {
+      isInstalled: true,
+      isAuthenticated: await isGhAuthenticated(cwd),
+    };
+  }
+
+  private async readGhPrStatus(body: unknown): Promise<GhPrStatus> {
+    const cliStatus = await this.readGhCliStatus();
+    if (!cliStatus.isInstalled || !cliStatus.isAuthenticated) {
+      return {
+        status: "unavailable",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const fallbackDirs = this.getGitOriginFallbackDirectories();
+    const requestedDir = readGhTargetDirectory(body);
+    const candidateDir = requestedDir ?? fallbackDirs[0] ?? this.cwd;
+    if (!candidateDir) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const repository = await resolveGitRepository(
+      candidateDir,
+      new Map<string, GitRepositoryInfo>(),
+    );
+    if (!repository) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const prInfo = await readGhPrInfo(repository.root);
+    if (!prInfo) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const state = prInfo.state ? prInfo.state.toUpperCase() : "";
+    const hasOpenPr = state === "OPEN";
+    if (!hasOpenPr) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const mergeable = prInfo.mergeable ? prInfo.mergeable.toUpperCase() : "";
+    const isDraft = prInfo.isDraft;
+    const canMerge = mergeable === "MERGEABLE" && !isDraft;
+    return {
+      status: "available",
+      hasOpenPr: true,
+      isDraft,
+      canMerge,
+      ciStatus: deriveGhCiStatus(prInfo.statusCheckRollup),
+      url: prInfo.url,
     };
   }
 
@@ -2433,6 +2541,126 @@ async function resolveGitRepository(
   return repository;
 }
 
+async function isGhInstalled(cwd: string): Promise<boolean> {
+  const result = await execGhCommand(cwd, ["--version"]);
+  return result.ok;
+}
+
+async function isGhAuthenticated(cwd: string): Promise<boolean> {
+  const result = await execGhCommand(cwd, ["auth", "status", "--hostname", "github.com"]);
+  return result.ok;
+}
+
+async function readGhPrInfo(root: string): Promise<GhPrInfo | null> {
+  const fields = "isDraft,mergeable,state,url,statusCheckRollup";
+  const result = await execGhCommand(root, ["pr", "view", "--json", fields]);
+  if (!result.ok) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!isJsonRecord(parsed)) {
+      return null;
+    }
+
+    return {
+      state: typeof parsed.state === "string" ? parsed.state : null,
+      isDraft: parsed.isDraft === true,
+      mergeable: typeof parsed.mergeable === "string" ? parsed.mergeable : null,
+      url: typeof parsed.url === "string" ? parsed.url : null,
+      statusCheckRollup: parsed.statusCheckRollup,
+    };
+  } catch (error) {
+    debugLog("app-server", "failed to parse gh pr view output", {
+      error: normalizeError(error).message,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+    return null;
+  }
+}
+
+function readGhTargetDirectory(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  if (!isJsonRecord(params)) {
+    return null;
+  }
+
+  if (typeof params.path === "string") {
+    return params.path;
+  }
+  if (typeof params.dir === "string") {
+    return params.dir;
+  }
+  if (typeof params.cwd === "string") {
+    return params.cwd;
+  }
+  if (typeof params.root === "string") {
+    return params.root;
+  }
+  if (typeof params.workspaceRoot === "string") {
+    return params.workspaceRoot;
+  }
+
+  return null;
+}
+
+function deriveGhCiStatus(statusCheckRollup: unknown): string | null {
+  if (!Array.isArray(statusCheckRollup) || statusCheckRollup.length === 0) {
+    return null;
+  }
+
+  let hasFailure = false;
+  let hasPending = false;
+  let hasSuccess = false;
+  for (const entry of statusCheckRollup) {
+    if (!isJsonRecord(entry)) {
+      continue;
+    }
+
+    const status = typeof entry.status === "string" ? entry.status.toUpperCase() : "";
+    const conclusion = typeof entry.conclusion === "string" ? entry.conclusion.toUpperCase() : "";
+
+    if (status && status !== "COMPLETED") {
+      hasPending = true;
+      continue;
+    }
+
+    if (!conclusion) {
+      hasPending = true;
+      continue;
+    }
+
+    if (["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion)) {
+      hasSuccess = true;
+      continue;
+    }
+
+    if (
+      ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"].includes(
+        conclusion,
+      )
+    ) {
+      hasFailure = true;
+      continue;
+    }
+
+    hasPending = true;
+  }
+
+  if (hasFailure) {
+    return "failure";
+  }
+  if (hasPending) {
+    return "pending";
+  }
+  if (hasSuccess) {
+    return "success";
+  }
+  return null;
+}
+
 async function listGitWorktreeRoots(root: string): Promise<string[]> {
   try {
     const output = await runGitCommand(root, ["worktree", "list", "--porcelain"]);
@@ -2475,6 +2703,46 @@ async function runGitCommand(cwd: string, args: string[]): Promise<string> {
           return;
         }
         resolveOutput(stdout.trim());
+      },
+    );
+  });
+}
+
+async function execGhCommand(
+  cwd: string,
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      "gh",
+      args,
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        env: {
+          ...process.env,
+          GH_PAGER: "cat",
+          GIT_PAGER: "cat",
+        },
+      },
+      (error, stdout, stderr) => {
+        const trimmedStdout = stdout.trim();
+        const trimmedStderr = stderr.trim();
+        if (error) {
+          resolve({
+            ok: false,
+            stdout: trimmedStdout,
+            stderr: trimmedStderr || normalizeError(error).message,
+          });
+          return;
+        }
+
+        resolve({
+          ok: true,
+          stdout: trimmedStdout,
+          stderr: trimmedStderr,
+        });
       },
     );
   });
