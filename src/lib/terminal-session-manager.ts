@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { IDisposable, IPty } from "node-pty";
 
@@ -97,6 +99,7 @@ interface TerminalSessionManagerOptions {
 
 let nodePtyModulePromise: Promise<typeof import("node-pty")> | null = null;
 let nodePtySpawnHelperPrepared = false;
+let nodePtyRebuildAttempted = false;
 
 export class TerminalSessionManager {
   private readonly cwd: string;
@@ -593,7 +596,25 @@ function readString(value: unknown): string | null {
 
 async function loadNodePty(): Promise<typeof import("node-pty")> {
   nodePtyModulePromise ??= import("node-pty");
-  return nodePtyModulePromise;
+  try {
+    return await nodePtyModulePromise;
+  } catch (error) {
+    nodePtyModulePromise = null;
+    if (shouldAttemptNodePtyRebuild(error) && !nodePtyRebuildAttempted) {
+      nodePtyRebuildAttempted = true;
+      const rebuilt = await tryRebuildNodePty();
+      if (rebuilt) {
+        nodePtyModulePromise = import("node-pty");
+        return await nodePtyModulePromise;
+      }
+    }
+
+    if (shouldAttemptNodePtyRebuild(error)) {
+      throw new Error(buildNodePtyLoadErrorMessage(error, nodePtyRebuildAttempted));
+    }
+
+    throw error;
+  }
 }
 
 function ensureNodePtySpawnHelperIsExecutable(): void {
@@ -626,4 +647,75 @@ function ensureNodePtySpawnHelperIsExecutable(): void {
 
 function normalizeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function shouldAttemptNodePtyRebuild(error: unknown): boolean {
+  const message = normalizeErrorMessage(error);
+  return message.includes("pty.node") || message.includes("Failed to load native module");
+}
+
+async function tryRebuildNodePty(): Promise<boolean> {
+  const packageRoot = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
+  if (!packageRoot) {
+    return false;
+  }
+
+  for (const command of [
+    { cmd: "pnpm", args: ["rebuild", "node-pty"] },
+    { cmd: "npm", args: ["rebuild", "node-pty"] },
+    { cmd: "yarn", args: ["rebuild", "node-pty"] },
+  ]) {
+    try {
+      await execFileAsync(command.cmd, command.args, packageRoot);
+      return true;
+    } catch (error) {
+      if (isCommandNotFoundError(error)) {
+        continue;
+      }
+    }
+  }
+
+  return false;
+}
+
+function execFileAsync(cmd: string, args: string[], cwd: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { cwd, timeout: 120_000 }, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function isCommandNotFoundError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function findPackageRoot(startDir: string): string | null {
+  let current = startDir;
+  for (let i = 0; i < 8; i += 1) {
+    if (existsSync(join(current, "package.json"))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  return null;
+}
+
+function buildNodePtyLoadErrorMessage(error: unknown, rebuildAttempted: boolean): string {
+  const baseMessage = normalizeErrorMessage(error);
+  const rebuildHint = rebuildAttempted
+    ? "Automatic rebuild failed."
+    : "The node-pty native module is missing.";
+  const instructions =
+    "Run `pnpm rebuild node-pty` in the Pocodex install directory (or reinstall) and restart.";
+  return `${rebuildHint} ${instructions}\n${baseMessage}`;
 }
