@@ -298,6 +298,229 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
+  it("converts plugin list artwork paths into data URLs", async () => {
+    const pluginRoot = await mkdtemp(join(tmpdir(), "pocodex-plugin-root-"));
+    tempDirs.push(pluginRoot);
+    const assetsPath = join(pluginRoot, "assets");
+    await mkdir(assetsPath, { recursive: true });
+
+    const logoSvg = `<svg xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" fill="#111"/></svg>`;
+    const composerSvg = `<svg xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="7" fill="#222"/></svg>`;
+    const screenshotSvg = `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h16v16H0z" fill="#333"/></svg>`;
+    const logoPath = join(assetsPath, "logo.svg");
+    const composerIconPath = join(assetsPath, "composer.svg");
+    const screenshotPath = join(assetsPath, "screenshot.svg");
+    await writeFile(logoPath, `${logoSvg}\n`, "utf8");
+    await writeFile(composerIconPath, `${composerSvg}\n`, "utf8");
+    await writeFile(screenshotPath, `${screenshotSvg}\n`, "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "req-plugin-list",
+        method: "plugin/list",
+        params: {},
+      },
+    });
+
+    const child = children.at(-1);
+    child?.stdout.write(
+      `${JSON.stringify({
+        id: "req-plugin-list",
+        result: {
+          marketplaces: [
+            {
+              name: "openai-curated",
+              path: join(pluginRoot, "marketplace"),
+              plugins: [
+                {
+                  id: "github",
+                  name: "github",
+                  authPolicy: "ON_INSTALL",
+                  enabled: true,
+                  installPolicy: "AVAILABLE",
+                  installed: true,
+                  source: {
+                    type: "local",
+                    path: pluginRoot,
+                  },
+                  interface: {
+                    capabilities: ["Interactive"],
+                    screenshots: [screenshotPath],
+                    displayName: "GitHub",
+                    logo: logoPath,
+                    composerIcon: composerIconPath,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      })}\n`,
+    );
+
+    await waitForCondition(() => Boolean(getMcpResponse(emittedMessages, "req-plugin-list")));
+
+    expect(getMcpJsonResult(emittedMessages, "req-plugin-list")).toEqual({
+      marketplaces: [
+        {
+          name: "openai-curated",
+          path: join(pluginRoot, "marketplace"),
+          plugins: [
+            {
+              id: "github",
+              name: "github",
+              authPolicy: "ON_INSTALL",
+              enabled: true,
+              installPolicy: "AVAILABLE",
+              installed: true,
+              source: {
+                type: "local",
+                path: pluginRoot,
+              },
+              interface: {
+                capabilities: ["Interactive"],
+                screenshots: [toSvgDataUrl(`${screenshotSvg}\n`)],
+                displayName: "GitHub",
+                logo: toSvgDataUrl(`${logoSvg}\n`),
+                composerIcon: toSvgDataUrl(`${composerSvg}\n`),
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await bridge.close();
+  });
+
+  it("converts plugin detail logos and skill icons into data URLs", async () => {
+    const pluginRoot = await mkdtemp(join(tmpdir(), "pocodex-plugin-root-"));
+    tempDirs.push(pluginRoot);
+    const assetsPath = join(pluginRoot, "assets");
+    const skillPath = join(pluginRoot, "skills", "demo");
+    await mkdir(assetsPath, { recursive: true });
+    await mkdir(skillPath, { recursive: true });
+
+    const logoSvg = `<svg xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" fill="#111"/></svg>`;
+    const iconSmallSvg = `<svg xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6" fill="#444"/></svg>`;
+    const iconLargeSvg = `<svg xmlns="http://www.w3.org/2000/svg"><path d="M2 2h12v12H2z" fill="#555"/></svg>`;
+    const logoPath = join(assetsPath, "logo.svg");
+    await writeFile(logoPath, `${logoSvg}\n`, "utf8");
+    await writeFile(join(skillPath, "icon-small.svg"), `${iconSmallSvg}\n`, "utf8");
+    await writeFile(join(skillPath, "icon-large.svg"), `${iconLargeSvg}\n`, "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "req-plugin-read",
+        method: "plugin/read",
+        params: {
+          marketplacePath: join(pluginRoot, "marketplace"),
+          pluginName: "github",
+        },
+      },
+    });
+
+    const child = children.at(-1);
+    child?.stdout.write(
+      `${JSON.stringify({
+        id: "req-plugin-read",
+        result: {
+          plugin: {
+            marketplaceName: "openai-curated",
+            marketplacePath: join(pluginRoot, "marketplace"),
+            mcpServers: [],
+            apps: [],
+            summary: {
+              id: "github",
+              name: "github",
+              authPolicy: "ON_INSTALL",
+              enabled: true,
+              installPolicy: "AVAILABLE",
+              installed: true,
+              source: {
+                type: "local",
+                path: pluginRoot,
+              },
+              interface: {
+                capabilities: ["Interactive"],
+                screenshots: [],
+                displayName: "GitHub",
+                logo: logoPath,
+              },
+            },
+            skills: [
+              {
+                name: "github",
+                description: "Triage GitHub work.",
+                path: "skills/demo/SKILL.md",
+                interface: {
+                  iconSmall: "./icon-small.svg",
+                  iconLarge: "./icon-large.svg",
+                },
+              },
+            ],
+          },
+        },
+      })}\n`,
+    );
+
+    await waitForCondition(() => Boolean(getMcpResponse(emittedMessages, "req-plugin-read")));
+
+    expect(getMcpJsonResult(emittedMessages, "req-plugin-read")).toEqual({
+      plugin: {
+        marketplaceName: "openai-curated",
+        marketplacePath: join(pluginRoot, "marketplace"),
+        mcpServers: [],
+        apps: [],
+        summary: {
+          id: "github",
+          name: "github",
+          authPolicy: "ON_INSTALL",
+          enabled: true,
+          installPolicy: "AVAILABLE",
+          installed: true,
+          source: {
+            type: "local",
+            path: pluginRoot,
+          },
+          interface: {
+            capabilities: ["Interactive"],
+            screenshots: [],
+            displayName: "GitHub",
+            logo: toSvgDataUrl(`${logoSvg}\n`),
+          },
+        },
+        skills: [
+          {
+            name: "github",
+            description: "Triage GitHub work.",
+            path: "skills/demo/SKILL.md",
+            interface: {
+              iconSmall: toSvgDataUrl(`${iconSmallSvg}\n`),
+              iconLarge: toSvgDataUrl(`${iconLargeSvg}\n`),
+            },
+          },
+        ],
+      },
+    });
+
+    await bridge.close();
+  });
+
   it("implements host fetch state for pinned threads and global state", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
@@ -3045,6 +3268,40 @@ function getFetchResponse(messages: unknown[], requestId: string) {
       (message as { type?: unknown }).type === "fetch-response" &&
       (message as { requestId?: unknown }).requestId === requestId,
   );
+}
+
+function getMcpResponse(messages: unknown[], requestId: string) {
+  return messages.find(
+    (message) =>
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      "message" in message &&
+      (message as { type?: unknown }).type === "mcp-response" &&
+      typeof (message as { message?: unknown }).message === "object" &&
+      (message as { message: { id?: unknown } }).message.id === requestId,
+  );
+}
+
+function getMcpJsonResult(messages: unknown[], requestId: string) {
+  const response = getMcpResponse(messages, requestId);
+  if (
+    !response ||
+    typeof response !== "object" ||
+    response === null ||
+    !("message" in response) ||
+    typeof response.message !== "object" ||
+    response.message === null ||
+    !("result" in response.message)
+  ) {
+    throw new Error(`Missing MCP response for ${requestId}`);
+  }
+
+  return response.message.result;
+}
+
+function toSvgDataUrl(contents: string): string {
+  return `data:image/svg+xml;base64,${Buffer.from(contents).toString("base64")}`;
 }
 
 function isBridgeMessage<TType extends string>(

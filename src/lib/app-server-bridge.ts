@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { ensureCodexCliBinary } from "./codex-bundle.js";
@@ -248,6 +248,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       reject: (reason?: unknown) => void;
     }
   >();
+  private readonly pendingMcpRequestMethods = new Map<string, string>();
   private readonly fetchRequests = new Map<string, AbortController>();
   private readonly persistedAtoms = new Map<string, unknown>();
   private readonly globalState = new Map<string, unknown>();
@@ -846,7 +847,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     if ("id" in message && !("method" in message)) {
-      this.handleJsonRpcResponse(message);
+      await this.handleJsonRpcResponse(message);
       return;
     }
 
@@ -875,7 +876,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
-  private handleJsonRpcResponse(message: JsonRecord): void {
+  private async handleJsonRpcResponse(message: JsonRecord): Promise<void> {
     const id =
       typeof message.id === "string" || typeof message.id === "number" ? String(message.id) : null;
     if (id && this.localRequests.has(id)) {
@@ -896,12 +897,29 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       return;
     }
 
+    const requestMethod = id ? (this.pendingMcpRequestMethods.get(id) ?? null) : null;
+    if (id) {
+      this.pendingMcpRequestMethods.delete(id);
+    }
+
+    let normalizedResult = message.result;
+    if (message.error === undefined && requestMethod) {
+      try {
+        normalizedResult = await this.normalizeForwardedMcpResult(requestMethod, message.result);
+      } catch (error) {
+        debugLog("app-server", "failed to normalize forwarded MCP result", {
+          error: normalizeError(error).message,
+          method: requestMethod,
+        });
+      }
+    }
+
     this.emit("bridge_message", {
       type: "mcp-response",
       hostId: this.hostId,
       message: {
         id: message.id,
-        ...(message.error !== undefined ? { error: message.error } : { result: message.result }),
+        ...(message.error !== undefined ? { error: message.error } : { result: normalizedResult }),
       },
     });
   }
@@ -928,6 +946,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       return;
     }
 
+    if (message.request.id !== undefined) {
+      this.pendingMcpRequestMethods.set(String(message.request.id), message.request.method);
+    }
+
     this.sendJsonRpcMessage({
       id: message.request.id,
       method: message.request.method,
@@ -945,6 +967,164 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       id: response.id,
       ...(response.error !== undefined ? { error: response.error } : { result: response.result }),
     });
+  }
+
+  private async normalizeForwardedMcpResult(method: string, result: unknown): Promise<unknown> {
+    switch (method) {
+      case "plugin/list":
+        return this.normalizePluginListResult(result);
+      case "plugin/read":
+        return this.normalizePluginReadResult(result);
+      default:
+        return result;
+    }
+  }
+
+  private async normalizePluginListResult(result: unknown): Promise<unknown> {
+    if (!isJsonRecord(result) || !Array.isArray(result.marketplaces)) {
+      return result;
+    }
+
+    const marketplaces = await Promise.all(
+      result.marketplaces.map(async (marketplace) => {
+        if (!isJsonRecord(marketplace) || !Array.isArray(marketplace.plugins)) {
+          return marketplace;
+        }
+
+        return {
+          ...marketplace,
+          plugins: await Promise.all(
+            marketplace.plugins.map((plugin) => this.normalizePluginSummary(plugin)),
+          ),
+        };
+      }),
+    );
+
+    return {
+      ...result,
+      marketplaces,
+    };
+  }
+
+  private async normalizePluginReadResult(result: unknown): Promise<unknown> {
+    if (!isJsonRecord(result) || !isJsonRecord(result.plugin)) {
+      return result;
+    }
+
+    const plugin = result.plugin;
+    const normalizedSummary = await this.normalizePluginSummary(plugin.summary);
+    const pluginRoot = this.getLocalPluginRoot(normalizedSummary);
+    const normalizedSkills = Array.isArray(plugin.skills)
+      ? await Promise.all(
+          plugin.skills.map((skill) => this.normalizePluginSkillSummary(skill, pluginRoot)),
+        )
+      : plugin.skills;
+
+    return {
+      ...result,
+      plugin: {
+        ...plugin,
+        summary: normalizedSummary,
+        ...(Array.isArray(plugin.skills) ? { skills: normalizedSkills } : {}),
+      },
+    };
+  }
+
+  private async normalizePluginSummary(summary: unknown): Promise<unknown> {
+    if (!isJsonRecord(summary)) {
+      return summary;
+    }
+
+    const pluginRoot = this.getLocalPluginRoot(summary);
+    return {
+      ...summary,
+      interface: await this.normalizePluginInterface(summary.interface, [pluginRoot]),
+    };
+  }
+
+  private async normalizePluginInterface(
+    value: unknown,
+    basePaths: Array<string | null>,
+  ): Promise<unknown> {
+    if (!isJsonRecord(value)) {
+      return value;
+    }
+
+    const screenshots = Array.isArray(value.screenshots)
+      ? (
+          await Promise.all(
+            value.screenshots.map((screenshot) =>
+              this.normalizeImageAssetField(screenshot, basePaths),
+            ),
+          )
+        ).filter((screenshot): screenshot is string => typeof screenshot === "string")
+      : value.screenshots;
+
+    return {
+      ...value,
+      logo: await this.normalizeImageAssetField(value.logo, basePaths),
+      composerIcon: await this.normalizeImageAssetField(value.composerIcon, basePaths),
+      ...(Array.isArray(value.screenshots) ? { screenshots } : {}),
+    };
+  }
+
+  private async normalizePluginSkillSummary(
+    summary: unknown,
+    pluginRoot: string | null,
+  ): Promise<unknown> {
+    if (!isJsonRecord(summary)) {
+      return summary;
+    }
+
+    const basePaths: Array<string | null> = [pluginRoot];
+    if (typeof summary.path === "string") {
+      if (pluginRoot && !isAbsolute(summary.path)) {
+        basePaths.unshift(resolve(pluginRoot, summary.path));
+      } else {
+        basePaths.unshift(summary.path);
+      }
+    }
+
+    return {
+      ...summary,
+      interface: await this.normalizeSkillInterface(summary.interface, basePaths),
+    };
+  }
+
+  private async normalizeSkillInterface(
+    value: unknown,
+    basePaths: Array<string | null>,
+  ): Promise<unknown> {
+    if (!isJsonRecord(value)) {
+      return value;
+    }
+
+    return {
+      ...value,
+      iconSmall: await this.normalizeImageAssetField(value.iconSmall, basePaths),
+      iconLarge: await this.normalizeImageAssetField(value.iconLarge, basePaths),
+    };
+  }
+
+  private getLocalPluginRoot(summary: unknown): string | null {
+    if (!isJsonRecord(summary) || !isJsonRecord(summary.source)) {
+      return null;
+    }
+
+    return summary.source.type === "local" && typeof summary.source.path === "string"
+      ? summary.source.path
+      : null;
+  }
+
+  private async normalizeImageAssetField(
+    value: unknown,
+    basePaths: Array<string | null>,
+  ): Promise<unknown> {
+    if (value === null || value === undefined || typeof value !== "string") {
+      return value;
+    }
+
+    return await renderableImageUrlFromPath(value, basePaths);
   }
 
   private async handleLocalMcpRequest(request: JsonRpcRequest): Promise<
@@ -2461,6 +2641,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private rejectPendingRequests(error: Error): void {
     this.localRequests.forEach(({ reject }) => reject(error));
     this.localRequests.clear();
+    this.pendingMcpRequestMethods.clear();
   }
 
   private listExistingPaths(body: unknown): string[] {
@@ -3306,6 +3487,111 @@ function normalizeFrontmatterScalar(rawValue: string): string | null {
   }
 
   return trimmed;
+}
+
+async function renderableImageUrlFromPath(
+  value: string,
+  basePaths: Array<string | null>,
+): Promise<string | null> {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  if (isWebRenderableImageUrl(trimmed)) {
+    return trimmed;
+  }
+
+  const filePath = await resolveLocalImageAssetPath(trimmed, basePaths);
+  if (!filePath) {
+    return null;
+  }
+
+  const mimeType = getImageMimeType(filePath);
+  if (!mimeType) {
+    return null;
+  }
+
+  const contents = await readFile(filePath);
+  return `data:${mimeType};base64,${contents.toString("base64")}`;
+}
+
+async function resolveLocalImageAssetPath(
+  assetPath: string,
+  basePaths: Array<string | null>,
+): Promise<string | null> {
+  if (isAbsolute(assetPath)) {
+    return (await isRegularFile(assetPath)) ? assetPath : null;
+  }
+
+  for (const basePath of basePaths) {
+    const resolvedBasePath = await resolveAssetBasePath(basePath);
+    if (!resolvedBasePath) {
+      continue;
+    }
+
+    const candidate = resolve(resolvedBasePath, assetPath);
+    if (await isRegularFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function resolveAssetBasePath(basePath: string | null): Promise<string | null> {
+  if (!basePath) {
+    return null;
+  }
+
+  try {
+    const fileStats = await stat(basePath);
+    return fileStats.isFile() ? dirname(basePath) : basePath;
+  } catch {
+    return looksLikeFilePath(basePath) ? dirname(basePath) : basePath;
+  }
+}
+
+async function isRegularFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isWebRenderableImageUrl(value: string): boolean {
+  return value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://");
+}
+
+function looksLikeFilePath(path: string): boolean {
+  return basename(path).includes(".");
+}
+
+function getImageMimeType(path: string): string | null {
+  switch (extname(path).toLowerCase()) {
+    case ".apng":
+      return "image/apng";
+    case ".avif":
+      return "image/avif";
+    case ".bmp":
+      return "image/bmp";
+    case ".gif":
+      return "image/gif";
+    case ".ico":
+      return "image/x-icon";
+    case ".jpeg":
+    case ".jpg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    default:
+      return null;
+  }
 }
 
 function readCodexAgentsMarkdownContents(body: unknown): string | null {
