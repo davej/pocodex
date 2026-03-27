@@ -984,6 +984,32 @@ describe("renderBootstrapScript", () => {
     });
   });
 
+  it("validates without appending a token when the page URL has no token", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/",
+    });
+    harness.run(script);
+
+    expect(harness.fetchCalls).toContainEqual({
+      input: "/session-check",
+      init: {
+        cache: "no-store",
+        credentials: "same-origin",
+      },
+    });
+  });
+
   it("runs without throwing and installs the browser bridge", () => {
     const script = renderBootstrapScript({
       sentryOptions: {
