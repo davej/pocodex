@@ -2548,6 +2548,47 @@ describe("renderBootstrapScript", () => {
     expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
   });
 
+  it("does not treat the mobile sidebar as open when the content pane has the collapsed class", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "collapsed",
+      },
+    });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface left-0");
+    const contentChild = harness.document.createElement("div");
+    contentPane.appendChild(contentChild);
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarClosedState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    drainTestTimers(harness.timers);
+    harness.dispatchedMessages.length = 0;
+
+    harness.document.dispatchEvent(new TestMouseEvent("click", { target: contentChild }));
+    drainTestTimers(harness.timers);
+
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
+  });
+
   it("reapplies the stored mobile sidebar mode when the shell resets after restore", async () => {
     const script = renderBootstrapScript({
       sentryOptions: {

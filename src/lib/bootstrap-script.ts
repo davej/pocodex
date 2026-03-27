@@ -667,6 +667,17 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return false;
     }
 
+    const className =
+      typeof (contentPane as Element & { className?: string }).className === "string"
+        ? ((contentPane as Element & { className?: string }).className ?? "").trim()
+        : "";
+    if (className.includes("left-token-sidebar")) {
+      return true;
+    }
+    if (className.split(/\s+/).includes("left-0")) {
+      return false;
+    }
+
     const style = (
       contentPane as Element & {
         style?: { width?: string; transform?: string };
