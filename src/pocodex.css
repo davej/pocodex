@@ -134,6 +134,7 @@ html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] {
   color: var(--pocodex-text);
   box-shadow: var(--pocodex-shadow);
   backdrop-filter: blur(14px);
+  pointer-events: auto;
 }
 
 html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] strong {
@@ -151,18 +152,80 @@ html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-card] p {
   line-height: 1.45;
 }
 
-html[data-pocodex="true"] #pocodex-import-host {
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-actions] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-actions] button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--pocodex-button-border);
+  border-radius: 999px;
+  background: var(--pocodex-button-secondary-bg);
+  color: var(--pocodex-text);
+  font: inherit;
+  font-size: var(--text-base, 13px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+html[data-pocodex="true"] #pocodex-status-host [data-pocodex-status-actions] button:hover {
+  background: var(--pocodex-button-secondary-hover);
+}
+
+html[data-pocodex="true"]
+  #pocodex-status-host
+  [data-pocodex-status-actions]
+  button[data-pocodex-status-style="primary"] {
+  background: var(--pocodex-button-primary-bg);
+  color: var(--pocodex-button-primary-fg);
+  border-color: transparent;
+}
+
+html[data-pocodex="true"]
+  #pocodex-status-host
+  [data-pocodex-status-actions]
+  button[data-pocodex-status-style="primary"]:hover {
+  background: var(--pocodex-button-primary-hover);
+}
+
+html[data-pocodex="true"] #pocodex-workspace-root-picker-host {
   position: fixed;
   inset: 0;
   z-index: 2147483645;
   pointer-events: none;
 }
 
-html[data-pocodex="true"] #pocodex-import-host[hidden] {
+html[data-pocodex="true"] #pocodex-workspace-root-picker-host[hidden] {
   display: none;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-backdrop] {
+@keyframes pocodex-workspace-root-picker-backdrop-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes pocodex-workspace-root-picker-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-backdrop] {
   position: absolute;
   inset: 0;
   display: flex;
@@ -174,12 +237,12 @@ html[data-pocodex="true"] [data-pocodex-import-backdrop] {
   pointer-events: auto;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-dialog] {
-  width: min(760px, calc(100vw - 32px));
-  max-height: min(720px, calc(100vh - 48px));
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-dialog] {
+  width: min(860px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 48px));
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
   padding: calc(var(--spacing, 4px) * 5);
   border: 1px solid var(--pocodex-border);
   border-radius: var(--pocodex-radius-lg);
@@ -189,155 +252,44 @@ html[data-pocodex="true"] [data-pocodex-import-dialog] {
   backdrop-filter: blur(16px);
 }
 
-html[data-pocodex="true"] [data-pocodex-import-header] {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-header] {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-header] h2,
-html[data-pocodex="true"] [data-pocodex-import-header] p,
-html[data-pocodex="true"] [data-pocodex-import-path] {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-header] h2,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-header] p,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-error],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-empty] {
   margin: 0;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-header] h2 {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-header] h2 {
   font-size: var(--text-xl, 28px);
   font-weight: 600;
   line-height: 1.1;
   letter-spacing: var(--tracking-tight, -0.025em);
 }
 
-html[data-pocodex="true"] [data-pocodex-import-header] p {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-header] p {
   color: var(--pocodex-text-secondary);
   font-size: var(--text-base, 13px);
   line-height: 1.45;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-path] {
-  padding: 10px 12px;
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-open-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-new-folder-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-cancel-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-use-folder-button] {
+  min-height: 34px;
+  padding: 6px 12px;
   border: 1px solid var(--pocodex-border-light);
   border-radius: var(--pocodex-radius-sm);
   background: var(--pocodex-surface-subtle);
-  color: var(--pocodex-text-secondary);
-  font-family: var(--font-mono, var(--vscode-editor-font-family, monospace));
-  font-size: var(--text-sm, 12px);
-  line-height: 1.45;
-  word-break: break-all;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-list] {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  overflow: auto;
-  padding-right: 4px;
-  border-bottom: 1px solid var(--pocodex-border-light);
-
-  scrollbar-color: var(--color-token-scrollbar-slider-background, var(--pocodex-border-heavy))
-    transparent;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-row] {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  padding: 12px 14px;
-  border: 1px solid var(--pocodex-border-light);
-  border-radius: var(--pocodex-radius-md);
-  background: var(--pocodex-surface-subtle);
-  transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    box-shadow 120ms ease,
-    opacity 120ms ease;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-row]:hover {
-  background: var(--pocodex-list-hover);
-  border-color: var(--pocodex-border);
-}
-
-html[data-pocodex="true"] [data-pocodex-import-row]:has(input:checked) {
-  background: color-mix(in srgb, var(--pocodex-list-selected) 72%, var(--pocodex-surface-subtle));
-  border-color: color-mix(in srgb, var(--pocodex-accent) 34%, var(--pocodex-border-heavy));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pocodex-accent) 20%, transparent);
-}
-
-html[data-pocodex="true"] [data-pocodex-import-row]:has(input:disabled) {
-  opacity: 0.68;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-row] input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 2px 0 0;
-  accent-color: var(--pocodex-checkbox-accent);
-  cursor: pointer;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-row] input[type="checkbox"]:disabled {
-  cursor: not-allowed;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-details] {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-details] strong {
-  font-size: var(--text-base, 13px);
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-details] code {
-  color: var(--pocodex-text-secondary);
-  font-family: var(--font-mono, var(--vscode-editor-font-family, monospace));
-  font-size: var(--text-sm, 12px);
-  line-height: 1.45;
-  word-break: break-all;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-badges] {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-badge] {
-  padding: 4px 8px;
-  border: 1px solid var(--pocodex-border-light);
-  border-radius: var(--radius-full, 999px);
-  background: color-mix(in srgb, var(--pocodex-surface-subtle) 92%, transparent);
-  color: var(--color-token-badge-foreground, var(--pocodex-text-secondary));
-  font-size: var(--text-xs, 10px);
-  font-weight: 500;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-actions] {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  padding-top: 14px;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-actions] button {
-  min-width: 140px;
-  padding: 4px 6px;
-  border: 1px solid var(--pocodex-button-border);
-  border-radius: var(--pocodex-radius-sm);
-  background: var(--pocodex-button-secondary-bg);
   color: var(--pocodex-text);
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   font-size: var(--text-base, 13px);
-  /* font-weight: 500; */
   line-height: 1.35;
   transition:
     background-color 120ms ease,
@@ -346,85 +298,141 @@ html[data-pocodex="true"] [data-pocodex-import-actions] button {
     opacity 120ms ease;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-actions] button[data-variant="primary"] {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-open-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-new-folder-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-cancel-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-use-folder-button],
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-row] {
+  cursor: pointer;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-use-folder-button] {
   background: var(--pocodex-button-primary-bg);
+  border-color: var(--pocodex-button-primary-bg);
   color: var(--pocodex-button-primary-fg);
 }
 
-html[data-pocodex="true"] [data-pocodex-import-actions] button:disabled {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-open-button]:disabled,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-new-folder-button]:disabled,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-cancel-button]:disabled,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-use-folder-button]:disabled,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-row]:disabled {
   cursor: not-allowed;
   opacity: 0.56;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-actions] button:hover:not(:disabled) {
-  border-color: var(--pocodex-border-heavy);
-  background: var(--pocodex-button-secondary-hover);
-}
-
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-open-button]:hover:not(:disabled),
 html[data-pocodex="true"]
-  [data-pocodex-import-actions]
-  button[data-variant="primary"]:hover:not(:disabled) {
-  border-color: var(--pocodex-button-primary-bg);
-  background: var(--pocodex-button-primary-hover);
-}
-
-html[data-pocodex="true"] [data-pocodex-import-actions] button:focus-visible,
-html[data-pocodex="true"] [data-pocodex-import-menu-item="true"]:focus-visible {
-  outline: 2px solid var(--pocodex-focus);
-  outline-offset: 2px;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-menu-separator="true"] {
-  margin: 4px 8px;
-  border-top: 1px solid var(--pocodex-border-light);
-}
-
-html[data-pocodex="true"] [data-pocodex-import-menu-item="true"] {
-  width: calc(100% - 8px);
-  margin: 0;
-  padding: 5px 8px;
-  border: 0;
-  border-radius: var(--pocodex-radius-sm);
-  background: transparent;
-  color: var(--pocodex-text);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
-  font-size: 12px;
-  line-height: 1.35;
-  text-align: left;
-  cursor: pointer;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-menu-item="true"]:hover {
+  [data-pocodex-workspace-root-picker-new-folder-button]:hover:not(:disabled),
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-cancel-button]:hover:not(:disabled),
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-row]:hover:not(:disabled) {
+  border-color: var(--pocodex-border);
   background: var(--pocodex-list-hover);
 }
 
-html[data-pocodex="true"] [data-pocodex-import-menu-item="true"]:active {
-  background: color-mix(in srgb, var(--pocodex-list-hover) 72%, var(--pocodex-surface-subtle));
+html[data-pocodex="true"]
+  [data-pocodex-workspace-root-picker-use-folder-button]:hover:not(:disabled) {
+  background: var(--pocodex-button-primary-hover);
 }
 
-html[data-pocodex="true"] [data-pocodex-import-menu-icon="true"] {
-  width: 15px;
-  height: 15px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 15px;
-  color: inherit;
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-path-form] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: end;
 }
 
-html[data-pocodex="true"] [data-pocodex-import-menu-icon="true"] > svg {
-  width: 15px;
-  height: 15px;
-  display: block;
-  color: inherit;
-}
-
-html[data-pocodex="true"] [data-pocodex-import-menu-label="true"] {
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-path-label] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   min-width: 0;
-  flex: 1 1 auto;
+  font-size: var(--text-base, 13px);
+  font-weight: 600;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-path-input] {
+  min-width: 0;
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--pocodex-border-light);
+  border-radius: var(--pocodex-radius-sm);
+  background: var(--pocodex-surface-subtle);
+  color: var(--pocodex-text-secondary);
+  font-family: var(--font-mono, var(--vscode-editor-font-family, monospace));
+  font-size: var(--text-base, 13px);
+  line-height: 1.45;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-content] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-error] {
+  color: var(--color-token-error-foreground, #d04444);
+  font-size: var(--text-base, 13px);
+  line-height: 1.45;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-list] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 220px;
+  overflow: auto;
+  padding-right: 4px;
+  border-bottom: 1px solid var(--pocodex-border-light);
+  scrollbar-color: var(--color-token-scrollbar-slider-background, var(--pocodex-border-heavy))
+    transparent;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-row] {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--pocodex-border-light);
+  border-radius: var(--pocodex-radius-md);
+  background: var(--pocodex-surface-subtle);
+  color: var(--pocodex-text);
+  text-align: left;
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: var(--text-base, 13px);
+  line-height: 1.35;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-empty] {
+  padding: 16px;
+  border: 1px dashed var(--pocodex-border-light);
+  border-radius: var(--pocodex-radius-md);
+  color: var(--pocodex-text-secondary);
+  text-align: center;
+  font-size: var(--text-base, 13px);
+  line-height: 1.45;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-footer] {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-open-button]:focus-visible,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-new-folder-button]:focus-visible,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-cancel-button]:focus-visible,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-use-folder-button]:focus-visible,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-row]:focus-visible,
+html[data-pocodex="true"] [data-pocodex-workspace-root-picker-path-input]:focus-visible {
+  outline: 2px solid var(--pocodex-focus);
+  outline-offset: 2px;
 }
 
 html[data-pocodex="true"] [data-pocodex-open-in-app="true"] {
@@ -439,7 +447,7 @@ html[data-pocodex="true"] body {
   html[data-pocodex="true"] {
     /*
      * The browser theme exposes a dark primary button fill but resolves
-     * button-primary text to the same dark token, so keep the import CTA
+     * button-primary text to the same dark token, so keep the picker CTA
      * legible by forcing a light foreground in dark mode.
      */
     --pocodex-button-primary-fg: var(--color-white, #ffffff);
@@ -476,37 +484,98 @@ html[data-pocodex="true"] [aria-label="Open in Popout Window"] {
     opacity: 1 !important;
   }
 
-  html[data-pocodex="true"] [data-pocodex-import-backdrop] {
+  html[data-pocodex="true"] [data-pocodex-workspace-root-picker-backdrop] {
     align-items: stretch;
     padding: 12px;
   }
 
-  html[data-pocodex="true"] [data-pocodex-import-dialog] {
+  html[data-pocodex="true"] [data-pocodex-workspace-root-picker-dialog] {
     width: auto;
     max-height: none;
     min-height: 100%;
     border-radius: var(--pocodex-radius-md);
   }
 
-  html[data-pocodex="true"] [data-pocodex-import-header] h2 {
+  html[data-pocodex="true"] [data-pocodex-workspace-root-picker-header] h2 {
     font-size: 22px;
   }
 
-  html[data-pocodex="true"] [data-pocodex-import-row] {
-    grid-template-columns: auto minmax(0, 1fr);
+  html[data-pocodex="true"] [data-pocodex-workspace-root-picker-path-form] {
+    grid-template-columns: 1fr;
   }
 
-  html[data-pocodex="true"] [data-pocodex-import-badges] {
-    grid-column: 2;
-    justify-content: flex-start;
-  }
-
-  html[data-pocodex="true"] [data-pocodex-import-actions] {
+  html[data-pocodex="true"] [data-pocodex-workspace-root-picker-footer] {
     flex-direction: column-reverse;
   }
 
-  html[data-pocodex="true"] [data-pocodex-import-actions] button {
+  html[data-pocodex="true"] [data-pocodex-workspace-root-picker-footer] button {
     width: 100%;
+  }
+
+  /*
+   * The compact settings shell shifts the content pane right when the sidebar
+   * is open. On phones that leaves the actual settings form squeezed into a
+   * narrow strip, so let the menu overlay instead and allow form controls to
+   * expand to the available width.
+   */
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .window-fx-sidebar-surface.w-token-sidebar,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .window-fx-sidebar-surface.w-token-sidebar {
+    width: clamp(10rem, 42vw, 12rem);
+    max-width: calc(100vw - 104px);
+    border-inline-end: 1px solid var(--pocodex-border);
+    box-shadow: var(--pocodex-shadow);
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .pt-toolbar.main-surface.left-token-sidebar,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .pt-toolbar.main-surface.left-token-sidebar {
+    left: 0 !important;
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .mx-auto.flex.w-full.flex-col
+    > .flex.items-center.justify-between.gap-3.pb-panel,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .mx-auto.flex.w-full.flex-col
+    > .flex.items-center.justify-between.gap-3.pb-panel,
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3 {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3
+    > .flex.shrink-0.items-center.gap-2,
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"]
+    .mx-auto.flex.w-full.flex-col
+    .flex.items-center.justify-between.p-3
+    > .flex.shrink-0.items-center.gap-2 {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[320px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[260px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[240px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class*="w-[220px]"],
+  html[data-pocodex="true"][data-pocodex-route^="/settings"] [class~="max-w-xs"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[320px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[260px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[240px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class*="w-[220px]"],
+  html[data-pocodex="true"][data-pocodex-settings-shell="true"] [class~="max-w-xs"] {
+    width: 100% !important;
+    max-width: 100% !important;
   }
 
   #app-header-portal-main button {

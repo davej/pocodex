@@ -29,6 +29,7 @@ interface BrowserSession {
   subscribedWorkers: Set<string>;
   isFocused: boolean;
   terminalSessionIdsByLocalSessionId: Map<string, string>;
+  lastHeartbeatAckAt: number;
 }
 
 interface TerminalSessionRoute {
@@ -49,6 +50,8 @@ const TERMINAL_ATTACH_MESSAGE_TYPES = new Set(["terminal-create", "terminal-atta
 const TERMINAL_STREAM_MESSAGE_TYPES = new Set(["terminal-data", "terminal-error", "terminal-exit"]);
 const TERMINAL_TARGET_BROWSER_SESSION_ID_KEY = "_pocodexBrowserSessionId";
 const TERMINAL_TARGET_BROWSER_TERMINAL_SESSION_ID_KEY = "_pocodexBrowserTerminalSessionId";
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45_000;
 
 export class PocodexServer {
   private readonly httpServer: HttpServer;
@@ -58,9 +61,19 @@ export class PocodexServer {
   private readonly workerSubscriberCounts = new Map<string, number>();
   private readonly terminalSessionRoutes = new Map<string, TerminalSessionRoute>();
   private readonly terminalSessionIdsByConversation = new Map<string, string>();
+  private readonly heartbeatIntervalMs: number;
+  private readonly heartbeatTimeoutMs: number;
+  private readonly heartbeatTimer: NodeJS.Timeout;
   private indexHtmlPromise?: Promise<string>;
+  private serviceWorkerScriptPromise?: Promise<string>;
+  private webManifestPromise?: Promise<string>;
 
   constructor(private readonly options: PocodexServerOptions) {
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    this.heartbeatTimeoutMs = Math.max(
+      options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS,
+      this.heartbeatIntervalMs + 1,
+    );
     this.httpServer = createServer((request, response) => {
       void this.handleHttpRequest(request, response);
     });
@@ -85,6 +98,11 @@ export class PocodexServer {
         message: error.message,
       });
     });
+
+    this.heartbeatTimer = setInterval(() => {
+      this.handleHeartbeatTick();
+    }, this.heartbeatIntervalMs);
+    this.heartbeatTimer.unref();
   }
 
   async listen(): Promise<void> {
@@ -98,6 +116,7 @@ export class PocodexServer {
   }
 
   async close(): Promise<void> {
+    clearInterval(this.heartbeatTimer);
     for (const session of this.sessions.values()) {
       session.socket.close(1000, "shutdown");
     }
@@ -181,6 +200,23 @@ export class PocodexServer {
       return;
     }
 
+    if (url.pathname === "/manifest.webmanifest") {
+      response.statusCode = 200;
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
+      response.end(await this.getWebManifest());
+      return;
+    }
+
+    if (url.pathname === "/service-worker.js") {
+      response.statusCode = 200;
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+      response.setHeader("Service-Worker-Allowed", "/");
+      response.end(await this.getServiceWorkerScript());
+      return;
+    }
+
     if (url.pathname === "/healthz") {
       response.statusCode = 200;
       response.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -245,6 +281,7 @@ export class PocodexServer {
       subscribedWorkers: new Set(),
       isFocused: true,
       terminalSessionIdsByLocalSessionId: new Map(),
+      lastHeartbeatAckAt: Date.now(),
     };
     this.sessions.set(session.id, session);
     debugLog("server", "browser connected", { sessionId: session.id });
@@ -277,6 +314,7 @@ export class PocodexServer {
 
   private async handleSocketMessage(session: BrowserSession, raw: string): Promise<void> {
     const envelope = JSON.parse(raw) as BrowserToServerEnvelope;
+    session.lastHeartbeatAckAt = Date.now();
     debugLog("server", "browser message", envelope);
 
     if (this.sessions.get(session.id) !== session) {
@@ -304,7 +342,14 @@ export class PocodexServer {
         }
         break;
       case "worker_message":
-        await this.options.relay.sendWorkerMessage(envelope.workerName, envelope.message);
+        void this.options.relay
+          .sendWorkerMessage(envelope.workerName, envelope.message)
+          .catch((error) => {
+            this.send(session.socket, {
+              type: "error",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
         break;
       case "focus_state":
         session.isFocused = envelope.isFocused;
@@ -315,6 +360,8 @@ export class PocodexServer {
             isFocused: envelope.isFocused,
           },
         });
+        break;
+      case "heartbeat_ack":
         break;
       default:
         this.send(session.socket, {
@@ -361,6 +408,16 @@ export class PocodexServer {
 
     const rewrittenMessage = rewriteRequestIdsForHost(session.id, message);
     debugLog("server", "forwarding bridge message to relay", rewrittenMessage);
+    if (isAsyncBridgeRelayMessage(rewrittenMessage)) {
+      void this.options.relay.forwardBridgeMessage(rewrittenMessage).catch((error) => {
+        this.send(session.socket, {
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+      return;
+    }
+
     await this.options.relay.forwardBridgeMessage(rewrittenMessage);
   }
 
@@ -755,6 +812,25 @@ export class PocodexServer {
     }
   }
 
+  private handleHeartbeatTick(): void {
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      if (now - session.lastHeartbeatAckAt > this.heartbeatTimeoutMs) {
+        debugLog("server", "closing stale browser session", {
+          sessionId: session.id,
+          idleMs: now - session.lastHeartbeatAckAt,
+        });
+        session.socket.close(4000, "heartbeat-timeout");
+        continue;
+      }
+
+      this.send(session.socket, {
+        type: "heartbeat",
+        sentAt: now,
+      });
+    }
+  }
+
   private send(socket: WebSocket, envelope: ServerToBrowserEnvelope): void {
     if (socket.readyState !== WebSocket.OPEN) {
       return;
@@ -767,6 +843,20 @@ export class PocodexServer {
       this.indexHtmlPromise = this.options.renderIndexHtml();
     }
     return this.indexHtmlPromise;
+  }
+
+  private getServiceWorkerScript(): Promise<string> {
+    if (!this.serviceWorkerScriptPromise) {
+      this.serviceWorkerScriptPromise = this.options.renderServiceWorkerScript();
+    }
+    return this.serviceWorkerScriptPromise;
+  }
+
+  private getWebManifest(): Promise<string> {
+    if (!this.webManifestPromise) {
+      this.webManifestPromise = this.options.renderWebManifest();
+    }
+    return this.webManifestPromise;
   }
 }
 
@@ -807,6 +897,25 @@ function readNonEmptyString(value: unknown): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+const ASYNC_BRIDGE_RELAY_MESSAGE_TYPES = new Set([
+  "fetch",
+  "cancel-fetch",
+  "fetch-stream",
+  "cancel-fetch-stream",
+  "mcp-request",
+  "mcp-response",
+  "mcp-notification",
+  "log-message",
+]);
+
+function isAsyncBridgeRelayMessage(message: unknown): boolean {
+  return (
+    isJsonRecord(message) &&
+    typeof message.type === "string" &&
+    ASYNC_BRIDGE_RELAY_MESSAGE_TYPES.has(message.type)
+  );
 }
 
 function stripInternalBridgeFields(message: JsonRecord): JsonRecord {

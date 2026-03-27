@@ -163,6 +163,35 @@ describe("PocodexServer", () => {
     await expect(response.text()).resolves.toContain("[data-pocodex-toast]");
   });
 
+  it("serves a web manifest for installable clients", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/manifest.webmanifest`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/manifest+json");
+    await expect(response.json()).resolves.toEqual({
+      id: "/",
+      name: "Pocodex",
+      short_name: "Pocodex",
+      start_url: "./",
+      display: "standalone",
+    });
+  });
+
+  it("serves a service worker script for shell caching", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/service-worker.js`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/javascript");
+    expect(response.headers.get("service-worker-allowed")).toBe("/");
+    await expect(response.text()).resolves.toContain("pocodex-shell:test");
+  });
+
   it("validates session tokens before websocket attach", async () => {
     const { server, url } = await createTestServer();
     servers.push(server);
@@ -248,6 +277,40 @@ describe("PocodexServer", () => {
     second.close();
   });
 
+  it("emits heartbeat envelopes to connected browser sessions", async () => {
+    const { server, url } = await createTestServer("secret", {
+      heartbeatIntervalMs: 20,
+      heartbeatTimeoutMs: 200,
+    });
+    servers.push(server);
+
+    const socket = await connect(url, "secret");
+
+    await expect(nextMessage(socket)).resolves.toEqual({
+      type: "heartbeat",
+      sentAt: expect.any(Number),
+    });
+
+    socket.close();
+  });
+
+  it("closes stale websocket sessions after missed heartbeat acknowledgements", async () => {
+    const { server, url } = await createTestServer("secret", {
+      heartbeatIntervalMs: 20,
+      heartbeatTimeoutMs: 60,
+    });
+    servers.push(server);
+
+    const socket = await connect(url, "secret");
+
+    await expect(
+      new Promise<number>((resolve, reject) => {
+        socket.once("close", (code) => resolve(code));
+        socket.once("error", reject);
+      }),
+    ).resolves.toBe(4000);
+  });
+
   it("refcounts worker subscriptions across browser sessions", async () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);
@@ -270,6 +333,129 @@ describe("PocodexServer", () => {
     expect(relay.unsubscribedWorkers).toEqual(["git"]);
 
     first.close();
+  });
+
+  it("does not block bridge messages behind worker dispatch", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    let releaseWorkerDispatch: (() => void) | null = null;
+    const workerDispatchBlocked = new Promise<void>((resolve) => {
+      releaseWorkerDispatch = resolve;
+    });
+    relay.sendWorkerMessage = async (workerName: string, message: unknown): Promise<void> => {
+      relay.workerMessages.push({ workerName, message });
+      await workerDispatchBlocked;
+    };
+
+    const socket = await connect(url, "secret");
+
+    socket.send(
+      JSON.stringify({
+        type: "worker_message",
+        workerName: "git",
+        message: {
+          type: "worker-request",
+          request: {
+            id: "worker-1",
+            method: "staged-and-unstaged-changes",
+          },
+        },
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "fetch",
+          requestId: "request-1",
+          url: "vscode://codex/thread/list",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.workerMessages.length === 1);
+    await waitForCondition(() => relay.forwardedMessages.length === 1);
+
+    expect(relay.forwardedMessages[0]).toEqual({
+      type: "fetch",
+      requestId: expect.stringMatching(/^pocodex:[^:]+:request-1$/),
+      url: "vscode://codex/thread/list",
+    });
+
+    releaseWorkerDispatch?.();
+    socket.close();
+  });
+
+  it("does not block request-like bridge messages behind relay work", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    let releaseBridgeDispatch: (() => void) | null = null;
+    const bridgeDispatchBlocked = new Promise<void>((resolve) => {
+      releaseBridgeDispatch = resolve;
+    });
+    relay.forwardBridgeMessage = async (message: unknown): Promise<void> => {
+      relay.forwardedMessages.push(message);
+      const method =
+        typeof message === "object" &&
+        message !== null &&
+        "request" in message &&
+        typeof (message as { request?: { method?: unknown } }).request?.method === "string"
+          ? (message as { request: { method: string } }).request.method
+          : typeof message === "object" &&
+              message !== null &&
+              "method" in message &&
+              typeof (message as { method?: unknown }).method === "string"
+            ? (message as { method: string }).method
+            : "";
+      if (method === "thread/list") {
+        await bridgeDispatchBlocked;
+      }
+    };
+
+    const socket = await connect(url, "secret");
+
+    socket.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "mcp-request",
+          request: {
+            id: "mcp-1",
+            method: "thread/list",
+          },
+        },
+      }),
+    );
+    socket.send(
+      JSON.stringify({
+        type: "bridge_message",
+        message: {
+          type: "fetch",
+          requestId: "request-1",
+          url: "vscode://codex/thread/list",
+        },
+      }),
+    );
+
+    await waitForCondition(() => relay.forwardedMessages.length === 2);
+
+    expect(relay.forwardedMessages[0]).toEqual({
+      type: "mcp-request",
+      request: {
+        id: expect.stringMatching(/^pocodex:[^:]+:mcp-1$/),
+        method: "thread/list",
+      },
+    });
+    expect(relay.forwardedMessages[1]).toEqual({
+      type: "fetch",
+      requestId: expect.stringMatching(/^pocodex:[^:]+:request-1$/),
+      url: "vscode://codex/thread/list",
+    });
+
+    releaseBridgeDispatch?.();
+    socket.close();
   });
 
   it("routes terminal output to all observers while enforcing a single controller", async () => {
@@ -457,6 +643,7 @@ describe("PocodexServer", () => {
     });
     first.close();
     await firstClosed;
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     second.send(
       JSON.stringify({
@@ -525,7 +712,13 @@ async function createTestServer(): Promise<{
   server: PocodexServer;
   url: string;
 }>;
-async function createTestServer(token = "secret"): Promise<{
+async function createTestServer(
+  token = "secret",
+  options: {
+    heartbeatIntervalMs?: number;
+    heartbeatTimeoutMs?: number;
+  } = {},
+): Promise<{
   relay: StubRelay;
   server: PocodexServer;
   url: string;
@@ -542,6 +735,17 @@ async function createTestServer(token = "secret"): Promise<{
     webviewRoot,
     readPocodexStylesheet: async () => "#pocodex-toast-host [data-pocodex-toast] { color: red; }",
     renderIndexHtml: async () => "<!doctype html><html><body></body></html>",
+    renderWebManifest: async () =>
+      JSON.stringify({
+        id: "/",
+        name: "Pocodex",
+        short_name: "Pocodex",
+        start_url: "./",
+        display: "standalone",
+      }),
+    renderServiceWorkerScript: async () => "const CACHE_NAME = 'pocodex-shell:test';",
+    heartbeatIntervalMs: options.heartbeatIntervalMs,
+    heartbeatTimeoutMs: options.heartbeatTimeoutMs,
   });
 
   await server.listen();

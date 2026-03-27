@@ -4,7 +4,7 @@
 
 Requirements:
 
-- macOS with a local Codex install, usually `/Applications/Codex.app`
+- macOS with a local Codex install, usually `/Applications/Codex.app`, or WSL with the Windows Codex install available under `C:\Program Files\WindowsApps\OpenAI.Codex_...\app`
 - Node.js 24 or newer
 - pnpm
 
@@ -14,10 +14,16 @@ Install dependencies:
 pnpm install
 ```
 
-Run Pocodex directly from source:
+Run Pocodex directly from source with live CSS reloads and without interrupting the active Codex session:
 
 ```bash
 pnpm run dev
+```
+
+If you want automatic restart on TypeScript changes, use the explicit watcher:
+
+```bash
+pnpm run dev:watch
 ```
 
 Or build first and run the compiled CLI:
@@ -27,7 +33,7 @@ pnpm run build
 node dist/cli.js
 ```
 
-If you want live stylesheet reloads while editing `src/pocodex.css`, add `--dev`.
+If you are running from WSL, `pnpm run dev -- --app 'C:\Program Files\WindowsApps\OpenAI.Codex_...\app'` works, and so does the equivalent `/mnt/c/...` path.
 
 ## Useful Commands
 
@@ -53,7 +59,7 @@ POCODEX_DEBUG=1 pnpm run dev
 For UI work, start with:
 
 ```bash
-pnpm run dev -- --dev
+pnpm run dev
 ```
 
 Then edit `src/pocodex.css`. Pocodex watches that file and notifies the active browser session to swap in the new stylesheet without restarting the server.
@@ -62,7 +68,7 @@ Then edit `src/pocodex.css`. Pocodex watches that file and notifies the active b
 
 ### 1. Load the shipped Codex bundle
 
-Pocodex reads `Codex.app/Contents/Info.plist` and `Contents/Resources/app.asar`, extracts the `/webview` files into `~/.cache/pocodex/<version>`, and serves those real web assets instead of a locally rebuilt frontend.
+Pocodex resolves either the macOS `Codex.app` bundle layout or the Windows Store `.../app/resources` layout, extracts the `/webview` files from `app.asar` into `~/.cache/pocodex/<version>`, and serves those real web assets instead of a locally rebuilt frontend.
 
 ### 2. Patch the webview entry HTML
 
@@ -74,13 +80,15 @@ Before serving `index.html`, Pocodex injects:
 
 ### 3. Spawn the bundled `codex app-server`
 
-Pocodex starts the CLI shipped inside the app bundle with:
+Pocodex starts the CLI shipped inside the desktop install with:
 
 ```text
 codex app-server --listen stdio://
 ```
 
 It then initializes a JSON-RPC/MCP session over stdio and uses that process as the host runtime behind the browser session.
+
+On WSL, the bundled Linux `resources/codex` binary is copied into Pocodex's cache first so it can be executed outside the read-only WindowsApps mount.
 
 ### 4. Serve a browser-facing bridge
 

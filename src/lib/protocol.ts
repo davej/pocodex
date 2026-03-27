@@ -21,6 +21,10 @@ export interface PocodexServerOptions {
   webviewRoot: string;
   readPocodexStylesheet: () => Promise<string>;
   renderIndexHtml: () => Promise<string>;
+  renderWebManifest: () => Promise<string>;
+  renderServiceWorkerScript: () => Promise<string>;
+  heartbeatIntervalMs?: number;
+  heartbeatTimeoutMs?: number;
 }
 
 export interface HostBridge {
@@ -65,12 +69,18 @@ export interface BrowserFocusStateEnvelope {
   isFocused: boolean;
 }
 
+export interface BrowserHeartbeatAckEnvelope {
+  type: "heartbeat_ack";
+  sentAt: number;
+}
+
 export type BrowserToServerEnvelope =
   | BrowserBridgeEnvelope
   | BrowserWorkerSubscribeEnvelope
   | BrowserWorkerUnsubscribeEnvelope
   | BrowserWorkerMessageEnvelope
-  | BrowserFocusStateEnvelope;
+  | BrowserFocusStateEnvelope
+  | BrowserHeartbeatAckEnvelope;
 
 export interface ServerBridgeEnvelope {
   type: "bridge_message";
@@ -93,6 +103,11 @@ export interface ServerCssReloadEnvelope {
   href: string;
 }
 
+export interface ServerHeartbeatEnvelope {
+  type: "heartbeat";
+  sentAt: number;
+}
+
 export interface ServerSessionRevokedEnvelope {
   type: "session_revoked";
   reason: string;
@@ -108,6 +123,7 @@ export type ServerToBrowserEnvelope =
   | ServerWorkerMessageEnvelope
   | ServerClientNoticeEnvelope
   | ServerCssReloadEnvelope
+  | ServerHeartbeatEnvelope
   | ServerSessionRevokedEnvelope
   | ServerErrorEnvelope;
 

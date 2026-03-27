@@ -1,35 +1,42 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { deriveCodexHomePath, listCodexHomePathCandidates } from "./codex-home.js";
 
 export interface LoadedPersistedAtomRegistry {
   found: boolean;
+  path: string;
   state: Record<string, unknown>;
 }
 
 export function derivePersistedAtomRegistryPath(): string {
-  const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-  return join(codexHome, "pocodex", "persisted-atoms.json");
+  return join(deriveCodexHomePath(), "pocodex", "persisted-atoms.json");
 }
 
 export async function loadPersistedAtomRegistry(
   registryPath: string,
 ): Promise<LoadedPersistedAtomRegistry> {
-  try {
-    const raw = await readFile(registryPath, "utf8");
-    return {
-      found: true,
-      state: parsePersistedAtomRegistry(raw),
-    };
-  } catch (error) {
-    if (isMissingFileError(error)) {
+  for (const candidatePath of listPersistedAtomRegistryPathCandidates(registryPath)) {
+    try {
+      const raw = await readFile(candidatePath, "utf8");
       return {
-        found: false,
-        state: {},
+        found: true,
+        path: candidatePath,
+        state: parsePersistedAtomRegistry(raw),
       };
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+
+  return {
+    found: false,
+    path: registryPath,
+    state: {},
+  };
 }
 
 export async function savePersistedAtomRegistry(
@@ -72,4 +79,20 @@ function isJsonRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function listPersistedAtomRegistryPathCandidates(registryPath: string): string[] {
+  const candidates = [registryPath];
+  if (registryPath !== derivePersistedAtomRegistryPath()) {
+    return candidates;
+  }
+
+  for (const codexHome of listCodexHomePathCandidates()) {
+    const candidatePath = join(codexHome, "pocodex", "persisted-atoms.json");
+    if (!candidates.includes(candidatePath)) {
+      candidates.push(candidatePath);
+    }
+  }
+
+  return candidates;
 }

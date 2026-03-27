@@ -1,8 +1,8 @@
 # <img src="https://i.imgur.com/ionPEb2.png" alt="Pocodex" width="300">
 
-Pocodex lets you use Codex.app in a regular browser, including on your phone or any other remote device. It's like Claude Code's Remote Control, but for Codex!
+Pocodex lets you use the Codex desktop app in a regular browser, including on your phone or any other remote device. It's like Claude Code's Remote Control, but for Codex!
 
-It serves the real Codex desktop webview from `Codex.app`, reuses the bundled `codex app-server` as the agentic harness, and adds host-side shims for the desktop functionality the UI expects.
+It serves the real Codex desktop webview from the installed app bundle, reuses the bundled `codex app-server` as the agentic harness, and adds host-side shims for the desktop functionality the UI expects.
 
 <img src="https://i.imgur.com/mInn7oW.png" alt="Pocodex screenshot" width="200">
 
@@ -20,9 +20,11 @@ pocodex
 
 Pocodex prints a local URL and, when applicable, an "Open" URL. Open the printed URL in your browser.
 
+Pocodex now publishes a web manifest and service worker, so on supported browsers you can install it as a standalone app. If you are using a tokenized URL, open that URL once in the browser you plan to install from so the token is stored for later standalone launches.
+
 ## Requirements
 
-- macOS with a local Codex install, usually `/Applications/Codex.app`
+- macOS with a local Codex install, usually `/Applications/Codex.app`, or WSL with the Windows Codex install available under `C:\Program Files\WindowsApps\OpenAI.Codex_...\app`
 - Node.js 24 or newer
 
 ## Common Usage
@@ -44,35 +46,38 @@ When listening on `0.0.0.0`, Pocodex also prints a preferred LAN URL if it can f
 ## CLI
 
 ```text
-pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]
+pocodex [--token <secret>] [--app <path>] [--listen 127.0.0.1:8787] [--dev]
 ```
 
 ### Flags
 
 - `--token` optional session secret used to authorize the browser session
-- `--app` path to the Codex app bundle
+- `--app` path to the Codex desktop install root. On macOS this is usually `/Applications/Codex.app`. When running in WSL you can pass either `/mnt/c/Program Files/WindowsApps/OpenAI.Codex_.../app` or the original `C:\Program Files\WindowsApps\OpenAI.Codex_...\app` path.
 - `--listen` host and port to bind, for example `127.0.0.1:8787` or `0.0.0.0:8787`
 - `--dev` watches `src/pocodex.css` and pushes live CSS reload events to the connected browser
 
 If you expose Pocodex beyond loopback, use a long random token. When configured, the token gates `/session`, and the browser bootstrap stores it in `sessionStorage` so reconnects can work without re-entering it.
 
+When `--app` is omitted, Pocodex auto-detects `/Applications/Codex.app` on macOS or the newest `OpenAI.Codex_*` Windows Store install when running inside WSL.
+
 ## How It Works
 
 ### 1. Reuse the real Codex UI
 
-Pocodex reads and `Contents/Resources/app.asar` and serves those files. The browser is running the real Codex desktop UI, not a reimplementation.
+Pocodex reads the shipped `app.asar` from the desktop install and serves those files. The browser is running the real Codex desktop UI, not a reimplementation.
 
 ### 2. Patch the webview entrypoint
 
 Before serving `index.html`, Pocodex injects:
 
 - `pocodex.css`
+- PWA metadata including the web manifest and mobile install hints
 - an inline bootstrap script that installs the browser-side bridge
 - a matching CSP hash so the injected script can run under Codex's content security policy
 
 ### 3. Reuse Codex's bundled app server
 
-Pocodex starts the app server shipped inside the `Codex.app` bundle:
+Pocodex starts the app server shipped inside the desktop install:
 
 ```text
 codex app-server --listen stdio://
@@ -103,7 +108,7 @@ An optional token can gate the browser session. Pocodex supports multiple concur
 - Native desktop behaviors such as notifications, badge updates, context menus, power-save controls, and window mode controls are blocked or stubbed
 - Generic IPC coverage is incomplete; unsupported IPC methods return an error response
 - Streaming fetch is not implemented
-- Some host fetch endpoints are stubbed with empty or placeholder data
+- Personal ChatGPT cloud fetches under `/wham/*` are proxied through managed local auth, but some workspace, billing, and subscription endpoints still return stubs or placeholder data
 - This relies on internal Codex bundle structure and host protocols, so Codex app updates may break assumptions
 - Security is intentionally light; this is suitable for local use and trusted LANs, not public exposure
 

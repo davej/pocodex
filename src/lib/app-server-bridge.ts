@@ -2,21 +2,25 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-import {
-  deriveCodexDesktopGlobalStatePath,
-  loadCodexDesktopProjects,
-} from "./codex-desktop-projects.js";
+import { ensureCodexCliBinary } from "./codex-bundle.js";
+import { deriveCodexHomePath } from "./codex-home.js";
 import {
   DefaultCodexDesktopGitWorkerBridge,
   type CodexDesktopGitWorkerBridge,
 } from "./codex-desktop-git-worker.js";
 import { debugLog } from "./debug.js";
+import {
+  loadLocalEnvironment,
+  listLocalEnvironments,
+  readLocalEnvironmentConfig,
+  saveLocalEnvironmentConfig,
+} from "./local-environments.js";
 import type { HostBridge, JsonRecord } from "./protocol.js";
-import { deriveCodexCliBinaryPath } from "./startup-errors.js";
 import {
   derivePersistedAtomRegistryPath,
   loadPersistedAtomRegistry,
@@ -42,10 +46,10 @@ interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
   hostId?: string;
-  codexDesktopGlobalStatePath?: string;
   persistedAtomRegistryPath?: string;
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
+  codexCliPath?: string;
 }
 
 interface JsonRpcRequest {
@@ -74,6 +78,25 @@ interface AppServerFetchCancel {
   requestId: string;
 }
 
+interface RelativeFetchRequestContext {
+  rawUrl: string;
+  method: string;
+  headers?: unknown;
+  body?: unknown;
+  signal: AbortSignal;
+}
+
+interface RelativeFetchResponse {
+  status: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}
+
+interface ManagedCodexAuth {
+  accessToken: string;
+  accountId: string;
+}
+
 interface AppServerMcpRequestEnvelope {
   type: "mcp-request";
   request?: JsonRpcRequest;
@@ -84,6 +107,8 @@ interface AppServerMcpResponseEnvelope {
   response?: JsonRpcResponse;
   message?: JsonRpcResponse;
 }
+
+type WorkspaceRootPickerContext = "manual" | "onboarding";
 
 interface TopLevelRequestMessage {
   type: string;
@@ -113,6 +138,104 @@ interface GitOriginsResponse {
   homeDir: string;
 }
 
+interface GhCliStatus {
+  isInstalled: boolean;
+  isAuthenticated: boolean;
+}
+
+interface GhPrStatus {
+  status: string;
+  hasOpenPr: boolean;
+  isDraft: boolean;
+  canMerge: boolean;
+  ciStatus: string | null;
+  url: string | null;
+}
+
+interface GhPrInfo {
+  state: string | null;
+  isDraft: boolean;
+  mergeable: string | null;
+  url: string | null;
+  statusCheckRollup: unknown;
+}
+
+interface RecommendedSkill {
+  id: string;
+  name: string;
+  description: string;
+  shortDescription: string | null;
+  repoPath: string;
+  path: string;
+  iconSmall?: string;
+  iconLarge?: string;
+}
+
+interface RecommendedSkillsResponse {
+  repoRoot: string;
+  skills: RecommendedSkill[];
+  error?: string;
+}
+
+type UsageVisibilityPlan = "plus" | "pro" | "prolite";
+
+interface LocalRateLimitWindowSnapshot {
+  usedPercent: number | null;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+interface LocalCreditsSnapshot {
+  hasCredits: boolean | null;
+  unlimited: boolean | null;
+  balance: string | null;
+}
+
+interface LocalRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  primary: LocalRateLimitWindowSnapshot | null;
+  secondary: LocalRateLimitWindowSnapshot | null;
+  credits: LocalCreditsSnapshot | null;
+  planType: string | null;
+}
+
+interface WhamUsageWindowPayload {
+  used_percent: number | null;
+  limit_window_seconds: number | null;
+  reset_at: number | null;
+}
+
+interface WhamUsageRateLimitPayload {
+  primary_window: WhamUsageWindowPayload | null;
+  secondary_window: WhamUsageWindowPayload | null;
+  limit_reached: boolean;
+  allowed: boolean;
+}
+
+interface WhamAdditionalRateLimitPayload {
+  limit_name: string | null;
+  rate_limit: WhamUsageRateLimitPayload;
+}
+
+interface WhamUsagePayload {
+  credits: {
+    has_credits: boolean | null;
+    unlimited: boolean | null;
+    balance: string | null;
+  } | null;
+  plan_type: string | null;
+  rate_limit_name: string | null;
+  rate_limit: WhamUsageRateLimitPayload | null;
+  additional_rate_limits: WhamAdditionalRateLimitPayload[];
+}
+
+const USAGE_CORE_LIMIT_ID = "codex";
+const LOCAL_UNSUPPORTED_FETCH_STATUS = 501;
+const LOCAL_UNSUPPORTED_FETCH_BODY = {
+  error: "unsupported in Pocodex",
+};
+
 export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly hostId: string;
@@ -125,6 +248,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       reject: (reason?: unknown) => void;
     }
   >();
+  private readonly pendingMcpRequestMethods = new Map<string, string>();
   private readonly fetchRequests = new Map<string, AbortController>();
   private readonly persistedAtoms = new Map<string, unknown>();
   private readonly globalState = new Map<string, unknown>();
@@ -133,9 +257,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly sharedObjectSubscriptions = new Set<string>();
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
-  private readonly codexDesktopGlobalStatePath: string;
-  private readonly persistedAtomRegistryPath: string;
-  private readonly workspaceRootRegistryPath: string;
+  private persistedAtomRegistryPath: string;
+  private workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
   private activeWorkspaceRoot: string | null;
   private desktopImportPromptSeen = false;
@@ -159,8 +282,6 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     super();
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
-    this.codexDesktopGlobalStatePath =
-      options.codexDesktopGlobalStatePath ?? deriveCodexDesktopGlobalStatePath();
     this.persistedAtomRegistryPath =
       options.persistedAtomRegistryPath ?? derivePersistedAtomRegistryPath();
     this.workspaceRootRegistryPath =
@@ -185,20 +306,24 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       },
     });
     this.syncWorkspaceGlobalState();
-    this.child = spawn(
-      deriveCodexCliBinaryPath(options.appPath),
-      ["app-server", "--listen", "stdio://"],
-      {
-        stdio: "pipe",
-      },
-    );
+    const codexCliPath = options.codexCliPath;
+    if (!codexCliPath) {
+      throw new Error("Resolved Codex CLI path is required before starting the app-server bridge.");
+    }
+    this.child = spawn(codexCliPath, ["app-server", "--listen", "stdio://"], {
+      stdio: "pipe",
+    });
 
     this.bindProcess();
     this.bindGitWorker();
   }
 
   static async connect(options: AppServerBridgeOptions): Promise<AppServerBridge> {
-    const bridge = new AppServerBridge(options);
+    const codexCliPath = options.codexCliPath ?? (await ensureCodexCliBinary(options.appPath));
+    const bridge = new AppServerBridge({
+      ...options,
+      codexCliPath,
+    });
     await bridge.restorePersistedAtomRegistry();
     await bridge.restoreWorkspaceRootRegistry();
     await bridge.initialize();
@@ -304,7 +429,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return;
       case "electron-pick-workspace-root-option":
       case "electron-add-new-workspace-root-option":
-        this.openDesktopImportDialog("manual");
+        this.openWorkspaceRootPicker("manual");
+        return;
+      case "workspace-root-option-picked":
+        await this.handleWorkspaceRootOptionPicked(message);
         return;
       case "electron-update-workspace-root-options":
         await this.handleWorkspaceRootsUpdated(message);
@@ -427,20 +555,25 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
     try {
       switch (method) {
-        case "desktop-workspace-import/list":
+        case "workspace-root-picker/list":
           return buildIpcSuccessResponse(
             requestId,
-            await this.listDesktopWorkspaceImportCandidates(),
+            await this.listWorkspaceRootPickerEntries(payload.params),
           );
-        case "desktop-workspace-import/apply":
+        case "workspace-root-picker/create-directory":
           return buildIpcSuccessResponse(
             requestId,
-            await this.applyDesktopWorkspaceImports(payload.params),
+            await this.createWorkspaceRootPickerDirectory(payload.params),
           );
-        case "desktop-workspace-import/dismiss":
+        case "workspace-root-picker/confirm":
           return buildIpcSuccessResponse(
             requestId,
-            await this.dismissDesktopWorkspaceImportPrompt(),
+            await this.confirmWorkspaceRootPickerSelection(payload.params),
+          );
+        case "workspace-root-picker/cancel":
+          return buildIpcSuccessResponse(
+            requestId,
+            await this.cancelWorkspaceRootPicker(payload.params),
           );
         default:
           return buildIpcErrorResponse(
@@ -535,6 +668,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async restoreWorkspaceRootRegistry(): Promise<void> {
     try {
       const loaded = await loadWorkspaceRootRegistry(this.workspaceRootRegistryPath);
+      this.workspaceRootRegistryPath = loaded.path;
       if (loaded.state) {
         this.desktopImportPromptSeen = loaded.state.desktopImportPromptSeen;
         this.applyWorkspaceRootRegistry(loaded.state);
@@ -552,6 +686,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async restorePersistedAtomRegistry(): Promise<void> {
     try {
       const loaded = await loadPersistedAtomRegistry(this.persistedAtomRegistryPath);
+      this.persistedAtomRegistryPath = loaded.path;
       this.persistedAtoms.clear();
       for (const [key, value] of Object.entries(loaded.state)) {
         this.persistedAtoms.set(key, value);
@@ -564,93 +699,110 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
   }
 
-  private async listDesktopWorkspaceImportCandidates(): Promise<{
-    found: boolean;
-    path: string;
-    promptSeen: boolean;
-    shouldPrompt: boolean;
-    projects: Array<{
-      root: string;
-      label: string;
-      activeInCodex: boolean;
-      alreadyImported: boolean;
-      available: boolean;
+  private async listWorkspaceRootPickerEntries(params: unknown): Promise<{
+    currentPath: string;
+    parentPath: string | null;
+    homePath: string;
+    entries: Array<{
+      name: string;
+      path: string;
     }>;
   }> {
-    const loaded = await loadCodexDesktopProjects(this.codexDesktopGlobalStatePath);
-    const projects = loaded.projects.map((project) => ({
-      root: project.root,
-      label: project.label,
-      activeInCodex: project.active,
-      alreadyImported: this.workspaceRoots.has(project.root),
-      available: project.available,
-    }));
-    const shouldPrompt =
-      !this.desktopImportPromptSeen &&
-      projects.some((project) => project.available && !project.alreadyImported);
+    const currentPath = await this.resolveWorkspaceRootPickerDirectoryPath(params, {
+      fallbackToHome: true,
+      pathKey: "path",
+    });
+    const rawEntries = await readdir(currentPath, { withFileTypes: true });
+    const entries = await Promise.all(
+      rawEntries.map(async (entry) => {
+        const path = join(currentPath, entry.name);
+        if (!(await this.isDirectory(path))) {
+          return null;
+        }
 
-    return {
-      found: loaded.found,
-      path: loaded.path,
-      promptSeen: this.desktopImportPromptSeen,
-      shouldPrompt,
-      projects,
-    };
-  }
-
-  private async applyDesktopWorkspaceImports(params: unknown): Promise<{
-    importedRoots: string[];
-    skippedRoots: string[];
-    promptSeen: boolean;
-  }> {
-    const requestedRoots =
-      isJsonRecord(params) && Array.isArray(params.roots) ? uniqueStrings(params.roots) : [];
-    const loaded = await loadCodexDesktopProjects(this.codexDesktopGlobalStatePath);
-    const importableProjects = new Map(
-      loaded.projects
-        .filter((project) => project.available)
-        .map((project) => [project.root, project] as const),
+        return {
+          name: entry.name,
+          path,
+        };
+      }),
     );
-    const importedRoots: string[] = [];
-    const skippedRoots: string[] = [];
-
-    for (const root of requestedRoots) {
-      const project = importableProjects.get(root);
-      if (!project || this.workspaceRoots.has(root)) {
-        skippedRoots.push(root);
-        continue;
-      }
-
-      this.ensureWorkspaceRoot(root, {
-        label: project.label,
-        setActive: false,
-      });
-      importedRoots.push(root);
-    }
-
-    this.desktopImportPromptSeen = true;
-    await this.persistWorkspaceRootRegistry();
-
-    if (importedRoots.length > 0) {
-      this.emitWorkspaceRootsUpdated();
-    } else {
-      this.syncWorkspaceGlobalState();
-    }
 
     return {
-      importedRoots,
-      skippedRoots,
-      promptSeen: this.desktopImportPromptSeen,
+      currentPath,
+      parentPath: this.getWorkspaceRootPickerParentPath(currentPath),
+      homePath: homedir(),
+      entries: entries
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+        .sort((left, right) =>
+          left.name.localeCompare(right.name, undefined, {
+            numeric: true,
+            sensitivity: "accent",
+          }),
+        ),
     };
   }
 
-  private async dismissDesktopWorkspaceImportPrompt(): Promise<{
-    promptSeen: boolean;
+  private async createWorkspaceRootPickerDirectory(params: unknown): Promise<{
+    currentPath: string;
   }> {
-    this.desktopImportPromptSeen = true;
-    await this.persistWorkspaceRootRegistry();
+    if (!isJsonRecord(params)) {
+      throw new Error("Missing workspace root picker create-directory params.");
+    }
+
+    const parentPath = await this.resolveWorkspaceRootPickerDirectoryPath(params, {
+      fallbackToHome: false,
+      pathKey: "parentPath",
+    });
+    const name = typeof params.name === "string" ? params.name.trim() : "";
+    if (!name) {
+      throw new Error("Folder name cannot be empty.");
+    }
+    if (name === "." || name === "..") {
+      throw new Error("Folder name cannot be . or ..");
+    }
+    if (name.includes("/") || name.includes("\\")) {
+      throw new Error("Folder name cannot contain path separators.");
+    }
+
+    const currentPath = join(parentPath, name);
+    if (existsSync(currentPath)) {
+      throw new Error("That folder already exists.");
+    }
+
+    await mkdir(currentPath);
     return {
-      promptSeen: this.desktopImportPromptSeen,
+      currentPath,
+    };
+  }
+
+  private async confirmWorkspaceRootPickerSelection(params: unknown): Promise<{
+    action: "activated" | "added";
+    root: string;
+  }> {
+    if (!isJsonRecord(params)) {
+      throw new Error("Missing workspace root picker confirm params.");
+    }
+
+    const path = typeof params.path === "string" ? params.path : "";
+    const context = this.readWorkspaceRootPickerContext(params.context);
+    return this.confirmWorkspaceRootSelection(path, context);
+  }
+
+  private async cancelWorkspaceRootPicker(params: unknown): Promise<{
+    cancelled: true;
+  }> {
+    const context = isJsonRecord(params)
+      ? this.readWorkspaceRootPickerContext(params.context)
+      : "manual";
+    if (context === "onboarding") {
+      this.emitBridgeMessage({
+        type: "electron-onboarding-pick-workspace-or-create-default-result",
+        success: false,
+      });
+    }
+
+    return {
+      cancelled: true,
     };
   }
 
@@ -695,7 +847,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     if ("id" in message && !("method" in message)) {
-      this.handleJsonRpcResponse(message);
+      await this.handleJsonRpcResponse(message);
       return;
     }
 
@@ -724,7 +876,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
-  private handleJsonRpcResponse(message: JsonRecord): void {
+  private async handleJsonRpcResponse(message: JsonRecord): Promise<void> {
     const id =
       typeof message.id === "string" || typeof message.id === "number" ? String(message.id) : null;
     if (id && this.localRequests.has(id)) {
@@ -745,12 +897,29 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       return;
     }
 
+    const requestMethod = id ? (this.pendingMcpRequestMethods.get(id) ?? null) : null;
+    if (id) {
+      this.pendingMcpRequestMethods.delete(id);
+    }
+
+    let normalizedResult = message.result;
+    if (message.error === undefined && requestMethod) {
+      try {
+        normalizedResult = await this.normalizeForwardedMcpResult(requestMethod, message.result);
+      } catch (error) {
+        debugLog("app-server", "failed to normalize forwarded MCP result", {
+          error: normalizeError(error).message,
+          method: requestMethod,
+        });
+      }
+    }
+
     this.emit("bridge_message", {
       type: "mcp-response",
       hostId: this.hostId,
       message: {
         id: message.id,
-        ...(message.error !== undefined ? { error: message.error } : { result: message.result }),
+        ...(message.error !== undefined ? { error: message.error } : { result: normalizedResult }),
       },
     });
   }
@@ -758,6 +927,27 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private async handleMcpRequest(message: AppServerMcpRequestEnvelope): Promise<void> {
     if (!message.request || typeof message.request.method !== "string") {
       return;
+    }
+
+    const localResult = await this.handleLocalMcpRequest(message.request);
+    if (localResult.handled) {
+      if (message.request.id !== undefined) {
+        this.emitBridgeMessage({
+          type: "mcp-response",
+          hostId: this.hostId,
+          message: {
+            id: message.request.id,
+            ...(localResult.error !== undefined
+              ? { error: localResult.error }
+              : { result: localResult.result }),
+          },
+        });
+      }
+      return;
+    }
+
+    if (message.request.id !== undefined) {
+      this.pendingMcpRequestMethods.set(String(message.request.id), message.request.method);
     }
 
     this.sendJsonRpcMessage({
@@ -779,12 +969,225 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
+  private async normalizeForwardedMcpResult(method: string, result: unknown): Promise<unknown> {
+    switch (method) {
+      case "plugin/list":
+        return this.normalizePluginListResult(result);
+      case "plugin/read":
+        return this.normalizePluginReadResult(result);
+      default:
+        return result;
+    }
+  }
+
+  private async normalizePluginListResult(result: unknown): Promise<unknown> {
+    if (!isJsonRecord(result) || !Array.isArray(result.marketplaces)) {
+      return result;
+    }
+
+    const marketplaces = await Promise.all(
+      result.marketplaces.map(async (marketplace) => {
+        if (!isJsonRecord(marketplace) || !Array.isArray(marketplace.plugins)) {
+          return marketplace;
+        }
+
+        return {
+          ...marketplace,
+          plugins: await Promise.all(
+            marketplace.plugins.map((plugin) => this.normalizePluginSummary(plugin)),
+          ),
+        };
+      }),
+    );
+
+    return {
+      ...result,
+      marketplaces,
+    };
+  }
+
+  private async normalizePluginReadResult(result: unknown): Promise<unknown> {
+    if (!isJsonRecord(result) || !isJsonRecord(result.plugin)) {
+      return result;
+    }
+
+    const plugin = result.plugin;
+    const normalizedSummary = await this.normalizePluginSummary(plugin.summary);
+    const pluginRoot = this.getLocalPluginRoot(normalizedSummary);
+    const normalizedSkills = Array.isArray(plugin.skills)
+      ? await Promise.all(
+          plugin.skills.map((skill) => this.normalizePluginSkillSummary(skill, pluginRoot)),
+        )
+      : plugin.skills;
+
+    return {
+      ...result,
+      plugin: {
+        ...plugin,
+        summary: normalizedSummary,
+        ...(Array.isArray(plugin.skills) ? { skills: normalizedSkills } : {}),
+      },
+    };
+  }
+
+  private async normalizePluginSummary(summary: unknown): Promise<unknown> {
+    if (!isJsonRecord(summary)) {
+      return summary;
+    }
+
+    const pluginRoot = this.getLocalPluginRoot(summary);
+    return {
+      ...summary,
+      interface: await this.normalizePluginInterface(summary.interface, [pluginRoot]),
+    };
+  }
+
+  private async normalizePluginInterface(
+    value: unknown,
+    basePaths: Array<string | null>,
+  ): Promise<unknown> {
+    if (!isJsonRecord(value)) {
+      return value;
+    }
+
+    const screenshots = Array.isArray(value.screenshots)
+      ? (
+          await Promise.all(
+            value.screenshots.map((screenshot) =>
+              this.normalizeImageAssetField(screenshot, basePaths),
+            ),
+          )
+        ).filter((screenshot): screenshot is string => typeof screenshot === "string")
+      : value.screenshots;
+
+    return {
+      ...value,
+      logo: await this.normalizeImageAssetField(value.logo, basePaths),
+      composerIcon: await this.normalizeImageAssetField(value.composerIcon, basePaths),
+      ...(Array.isArray(value.screenshots) ? { screenshots } : {}),
+    };
+  }
+
+  private async normalizePluginSkillSummary(
+    summary: unknown,
+    pluginRoot: string | null,
+  ): Promise<unknown> {
+    if (!isJsonRecord(summary)) {
+      return summary;
+    }
+
+    const basePaths: Array<string | null> = [pluginRoot];
+    if (typeof summary.path === "string") {
+      if (pluginRoot && !isAbsolute(summary.path)) {
+        basePaths.unshift(resolve(pluginRoot, summary.path));
+      } else {
+        basePaths.unshift(summary.path);
+      }
+    }
+
+    return {
+      ...summary,
+      interface: await this.normalizeSkillInterface(summary.interface, basePaths),
+    };
+  }
+
+  private async normalizeSkillInterface(
+    value: unknown,
+    basePaths: Array<string | null>,
+  ): Promise<unknown> {
+    if (!isJsonRecord(value)) {
+      return value;
+    }
+
+    return {
+      ...value,
+      iconSmall: await this.normalizeImageAssetField(value.iconSmall, basePaths),
+      iconLarge: await this.normalizeImageAssetField(value.iconLarge, basePaths),
+    };
+  }
+
+  private getLocalPluginRoot(summary: unknown): string | null {
+    if (!isJsonRecord(summary) || !isJsonRecord(summary.source)) {
+      return null;
+    }
+
+    return summary.source.type === "local" && typeof summary.source.path === "string"
+      ? summary.source.path
+      : null;
+  }
+
+  private async normalizeImageAssetField(
+    value: unknown,
+    basePaths: Array<string | null>,
+  ): Promise<unknown> {
+    if (value === null || value === undefined || typeof value !== "string") {
+      return value;
+    }
+
+    return await renderableImageUrlFromPath(value, basePaths);
+  }
+
+  private async handleLocalMcpRequest(request: JsonRpcRequest): Promise<
+    | {
+        handled: false;
+      }
+    | {
+        handled: true;
+        result?: unknown;
+        error?: { message: string };
+      }
+  > {
+    switch (request.method) {
+      case "thread/archive":
+        return this.handleLocalThreadArchiveRequest(request.params, "thread/archive");
+      case "thread/unarchive":
+        return this.handleLocalThreadArchiveRequest(request.params, "thread/unarchive");
+      default:
+        return {
+          handled: false,
+        };
+    }
+  }
+
+  private async handleLocalThreadArchiveRequest(
+    params: unknown,
+    _method: "thread/archive" | "thread/unarchive",
+  ): Promise<
+    | {
+        handled: true;
+        result: { ok: true };
+      }
+    | {
+        handled: true;
+        error: { message: string };
+      }
+  > {
+    const threadId =
+      isJsonRecord(params) && typeof params.threadId === "string" ? params.threadId : null;
+    if (!threadId) {
+      return {
+        handled: true,
+        error: {
+          message: "Missing threadId.",
+        },
+      };
+    }
+
+    return {
+      handled: true,
+      result: {
+        ok: true,
+      },
+    };
+  }
+
   private async handleThreadArchive(
     message: JsonRecord,
     method: "thread/archive" | "thread/unarchive",
   ): Promise<void> {
     const conversationId =
       typeof message.conversationId === "string" ? message.conversationId : null;
+    const requestId = typeof message.requestId === "string" ? message.requestId : null;
     if (!conversationId) {
       return;
     }
@@ -793,8 +1196,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       await this.sendLocalRequest(method, {
         threadId: conversationId,
       });
+      if (requestId) {
+        this.emitBridgeMessage({
+          type: "serverRequest/resolved",
+          params: {
+            threadId: conversationId,
+            requestId,
+          },
+        });
+      }
     } catch (error) {
-      this.emit("error", normalizeError(error));
+      debugLog("app-server", "failed to update thread archive state", {
+        error: normalizeError(error).message,
+        method,
+        threadId: conversationId,
+      });
     }
   }
 
@@ -824,8 +1240,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
       if (message.url.startsWith("vscode://codex/")) {
         const body = parseJsonBody(message.body);
-        const handled = await this.handleCodexFetchRequest(message.url, body);
+        const handled = await this.handleCodexFetchRequest(
+          message.url,
+          typeof message.method === "string" ? message.method : "GET",
+          body,
+        );
         if (handled) {
+          if (message.url === "vscode://codex/ide-context") {
+            this.emitFetchError(
+              message.requestId,
+              handled.status,
+              "IDE context is unavailable in Pocodex.",
+            );
+            return;
+          }
           this.emitFetchSuccess(message.requestId, handled.body, handled.status);
           return;
         }
@@ -838,54 +1266,52 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       }
 
       if (message.url.startsWith("/")) {
-        const handled = await this.handleRelativeFetchRequest(message.url);
+        const handled = await this.handleRelativeFetchRequest({
+          rawUrl: message.url,
+          method: typeof message.method === "string" ? message.method : "GET",
+          headers: message.headers,
+          body: message.body,
+          signal: controller.signal,
+        });
         if (handled) {
-          this.emitFetchSuccess(message.requestId, handled.body, handled.status);
+          this.emitFetchSuccess(message.requestId, handled.body, handled.status, handled.headers);
           return;
         }
 
         const response = await fetch(new URL(message.url, "https://chatgpt.com"), {
           method: typeof message.method === "string" ? message.method : "GET",
-          headers: normalizeHeaders(message.headers),
+          headers: buildOutboundFetchHeaders(message.headers, message.body),
           body: normalizeRequestBody(message.body),
           signal: controller.signal,
         });
-        const bodyText = await response.text();
-        const headers: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          headers[key] = value;
-        });
+        const handledResponse = await readRemoteFetchResponse(response);
 
         this.emit("bridge_message", {
           type: "fetch-response",
           requestId: message.requestId,
           responseType: "success",
-          status: response.status,
-          headers,
-          bodyJsonString: JSON.stringify(parseResponseBody(bodyText)),
+          status: handledResponse.status,
+          headers: handledResponse.headers,
+          bodyJsonString: JSON.stringify(handledResponse.body),
         });
         return;
       }
 
       const response = await fetch(message.url, {
         method: typeof message.method === "string" ? message.method : "GET",
-        headers: normalizeHeaders(message.headers),
+        headers: buildOutboundFetchHeaders(message.headers, message.body),
         body: normalizeRequestBody(message.body),
         signal: controller.signal,
       });
-      const bodyText = await response.text();
-      const headers: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
+      const handledResponse = await readRemoteFetchResponse(response);
 
       this.emit("bridge_message", {
         type: "fetch-response",
         requestId: message.requestId,
         responseType: "success",
-        status: response.status,
-        headers,
-        bodyJsonString: JSON.stringify(parseResponseBody(bodyText)),
+        status: handledResponse.status,
+        headers: handledResponse.headers,
+        bodyJsonString: JSON.stringify(handledResponse.body),
       });
     } catch (error) {
       const normalized = normalizeError(error);
@@ -967,11 +1393,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleOnboardingPickWorkspaceOrCreateDefault(): Promise<void> {
-    await this.persistWorkspaceRootRegistry();
-    this.emitBridgeMessage({
-      type: "electron-onboarding-pick-workspace-or-create-default-result",
-      success: true,
-    });
+    this.openWorkspaceRootPicker("onboarding");
   }
 
   private async handleOnboardingSkipWorkspace(): Promise<void> {
@@ -1042,11 +1464,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
   private async handleCodexFetchRequest(
     rawUrl: string,
+    method: string,
     body: unknown,
   ): Promise<{ status: number; body: unknown } | null> {
     const url = new URL(rawUrl);
     const path = url.pathname.replace(/^\/+/, "");
-
     switch (path) {
       case "get-global-state":
         return {
@@ -1147,16 +1569,39 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "local-environments":
         return {
           status: 200,
-          body: {
-            environments: [],
-          },
+          body: await this.handleLocalEnvironmentsRequest(body),
+        };
+      case "local-environment-config":
+        return {
+          status: 200,
+          body: await this.handleLocalEnvironmentConfigRequest(body),
+        };
+      case "local-environment":
+        return {
+          status: 200,
+          body: await this.handleLocalEnvironmentRequest(body),
+        };
+      case "local-environment-config-save":
+        return {
+          status: 200,
+          body: await this.handleLocalEnvironmentConfigSaveRequest(body),
         };
       case "codex-home":
         return {
           status: 200,
           body: {
-            codexHome: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+            codexHome: deriveCodexHomePath(),
           },
+        };
+      case "codex-agents-md":
+        return {
+          status: 200,
+          body: await this.readCodexAgentsMarkdown(),
+        };
+      case "codex-agents-md-save":
+        return {
+          status: 200,
+          body: await this.writeCodexAgentsMarkdown(body),
         };
       case "list-automations":
         return {
@@ -1168,9 +1613,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "recommended-skills":
         return {
           status: 200,
-          body: {
-            skills: [],
-          },
+          body: await this.readRecommendedSkills(body),
         };
       case "fast-mode-rollout-metrics":
         return {
@@ -1214,28 +1657,18 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "gh-cli-status":
         return {
           status: 200,
-          body: {
-            isInstalled: false,
-            isAuthenticated: false,
-          },
+          body: await this.readGhCliStatus(),
         };
       case "gh-pr-status":
         return {
           status: 200,
-          body: {
-            status: "unavailable",
-            hasOpenPr: false,
-            isDraft: false,
-            canMerge: false,
-            ciStatus: null,
-            url: null,
-          },
+          body: await this.readGhPrStatus(body),
         };
       case "ide-context":
         return {
-          status: 200,
+          status: 503,
           body: {
-            ideContext: null,
+            error: "IDE context is unavailable in Pocodex.",
           },
         };
       case "paths-exist":
@@ -1248,9 +1681,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "account-info":
         return {
           status: 200,
-          body: {
-            plan: null,
-          },
+          body: await this.readAccountInfo(),
         };
       case "get-configuration":
         return {
@@ -1282,9 +1713,119 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleRelativeFetchRequest(
-    url: string,
-  ): Promise<{ status: number; body: unknown } | null> {
-    if (url === "/wham/accounts/check") {
+    request: RelativeFetchRequestContext,
+  ): Promise<RelativeFetchResponse | null> {
+    const pathname = new URL(request.rawUrl, "https://chatgpt.com").pathname;
+    const normalizedMethod = request.method.toUpperCase();
+
+    if (pathname.startsWith("/wham/")) {
+      return this.handleWhamFetchRequest(request, pathname, normalizedMethod);
+    }
+
+    if (pathname === "/subscriptions/auto_top_up/settings" && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          is_enabled: false,
+          recharge_threshold: null,
+          recharge_target: null,
+        },
+      };
+    }
+
+    if (pathname.startsWith("/accounts/check/") && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          accounts: {},
+        },
+      };
+    }
+
+    if (pathname.startsWith("/checkout_pricing_config/configs/") && normalizedMethod === "GET") {
+      return {
+        status: 200,
+        body: {
+          currency_config: null,
+        },
+      };
+    }
+
+    if (
+      normalizedMethod === "POST" &&
+      (pathname === "/subscriptions/auto_top_up/enable" ||
+        pathname === "/subscriptions/auto_top_up/update" ||
+        pathname === "/subscriptions/auto_top_up/disable")
+    ) {
+      return {
+        status: LOCAL_UNSUPPORTED_FETCH_STATUS,
+        body: LOCAL_UNSUPPORTED_FETCH_BODY,
+      };
+    }
+
+    if (pathname === "/payments/customer_portal" && normalizedMethod === "GET") {
+      return {
+        status: LOCAL_UNSUPPORTED_FETCH_STATUS,
+        body: LOCAL_UNSUPPORTED_FETCH_BODY,
+      };
+    }
+
+    return null;
+  }
+
+  private async handleWhamFetchRequest(
+    request: RelativeFetchRequestContext,
+    pathname: string,
+    normalizedMethod: string,
+  ): Promise<RelativeFetchResponse> {
+    const auth = await this.readManagedCodexAuth();
+    if (!auth) {
+      return this.buildWhamFallbackResponse(pathname, normalizedMethod);
+    }
+
+    let response = await this.proxyWhamFetchRequest(request, auth);
+    if (response.status !== 401 && response.status !== 403) {
+      return response;
+    }
+
+    await this.sendLocalRequestSafely("account/read", {
+      refreshToken: true,
+    });
+    const refreshedAuth = await this.readManagedCodexAuth();
+    if (!refreshedAuth) {
+      return response;
+    }
+
+    response = await this.proxyWhamFetchRequest(request, refreshedAuth);
+    return response;
+  }
+
+  private async proxyWhamFetchRequest(
+    request: RelativeFetchRequestContext,
+    auth: ManagedCodexAuth,
+  ): Promise<RelativeFetchResponse> {
+    const sourceUrl = new URL(request.rawUrl, "https://chatgpt.com");
+    const targetUrl = new URL(`/backend-api${sourceUrl.pathname}${sourceUrl.search}`, sourceUrl);
+    const headers = new Headers(buildOutboundFetchHeaders(request.headers, request.body));
+    headers.set("Authorization", `Bearer ${auth.accessToken}`);
+    headers.set("chatgpt-account-id", auth.accountId);
+    headers.set("originator", "codex_cli_rs");
+
+    const response = await fetch(targetUrl, {
+      method: request.method,
+      headers,
+      body: normalizeRequestBody(request.body),
+      signal: request.signal,
+    });
+
+    return readRemoteFetchResponse(response);
+  }
+
+  private async buildWhamFallbackResponse(
+    pathname: string,
+    normalizedMethod: string,
+  ): Promise<RelativeFetchResponse> {
+    if (pathname === "/wham/accounts/check" && normalizedMethod === "GET") {
       return {
         status: 200,
         body: {
@@ -1294,25 +1835,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       };
     }
 
-    if (url === "/wham/environments") {
+    if (pathname === "/wham/environments" && normalizedMethod === "GET") {
       return {
         status: 200,
         body: [],
       };
     }
 
-    if (url === "/wham/usage") {
+    if (pathname === "/wham/usage" && normalizedMethod === "GET") {
       return {
         status: 200,
-        body: {
-          credits: null,
-          plan_type: null,
-          rate_limit: null,
-        },
+        body: await this.readWhamUsage(),
       };
     }
 
-    if (url.startsWith("/wham/tasks/list")) {
+    if (pathname === "/wham/tasks/list" && normalizedMethod === "GET") {
       return {
         status: 200,
         body: {
@@ -1323,7 +1860,154 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       };
     }
 
-    return null;
+    return {
+      status: 401,
+      body: {
+        error: "Managed Codex auth is required for cloud requests.",
+      },
+    };
+  }
+
+  private async readAccountInfo(): Promise<{ plan: UsageVisibilityPlan | null }> {
+    const result = await this.sendLocalRequestSafely("account/read", {
+      refreshToken: false,
+    });
+    return {
+      plan: readUsageVisibilityPlanFromAccount(result),
+    };
+  }
+
+  private async readGhCliStatus(): Promise<GhCliStatus> {
+    const cwd = this.cwd.length > 0 ? this.cwd : process.cwd();
+    const installed = await isGhInstalled(cwd);
+    if (!installed) {
+      return {
+        isInstalled: false,
+        isAuthenticated: false,
+      };
+    }
+
+    return {
+      isInstalled: true,
+      isAuthenticated: await isGhAuthenticated(cwd),
+    };
+  }
+
+  private async readGhPrStatus(body: unknown): Promise<GhPrStatus> {
+    const cliStatus = await this.readGhCliStatus();
+    if (!cliStatus.isInstalled || !cliStatus.isAuthenticated) {
+      return {
+        status: "unavailable",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const fallbackDirs = this.getGitOriginFallbackDirectories();
+    const requestedDir = readGhTargetDirectory(body);
+    const candidateDir = requestedDir ?? fallbackDirs[0] ?? this.cwd;
+    if (!candidateDir) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const repository = await resolveGitRepository(
+      candidateDir,
+      new Map<string, GitRepositoryInfo>(),
+    );
+    if (!repository) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const prInfo = await readGhPrInfo(repository.root);
+    if (!prInfo) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const state = prInfo.state ? prInfo.state.toUpperCase() : "";
+    const hasOpenPr = state === "OPEN";
+    if (!hasOpenPr) {
+      return {
+        status: "available",
+        hasOpenPr: false,
+        isDraft: false,
+        canMerge: false,
+        ciStatus: null,
+        url: null,
+      };
+    }
+
+    const mergeable = prInfo.mergeable ? prInfo.mergeable.toUpperCase() : "";
+    const isDraft = prInfo.isDraft;
+    const canMerge = mergeable === "MERGEABLE" && !isDraft;
+    return {
+      status: "available",
+      hasOpenPr: true,
+      isDraft,
+      canMerge,
+      ciStatus: deriveGhCiStatus(prInfo.statusCheckRollup),
+      url: prInfo.url,
+    };
+  }
+
+  private async readWhamUsage(): Promise<WhamUsagePayload> {
+    const result = await this.sendLocalRequestSafely("account/rateLimits/read");
+    return buildWhamUsagePayload(result);
+  }
+
+  private async readManagedCodexAuth(): Promise<ManagedCodexAuth | null> {
+    const authPath = join(deriveCodexHomePath(), "auth.json");
+
+    try {
+      const contents = await readFile(authPath, "utf8");
+      const parsed = JSON.parse(contents);
+      const tokens = isJsonRecord(parsed) && isJsonRecord(parsed.tokens) ? parsed.tokens : null;
+      const accessToken =
+        typeof tokens?.access_token === "string" ? tokens.access_token.trim() : "";
+      const accountId = typeof tokens?.account_id === "string" ? tokens.account_id.trim() : "";
+
+      if (!accessToken || !accountId) {
+        return null;
+      }
+
+      return {
+        accessToken,
+        accountId,
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return null;
+      }
+
+      debugLog("app-server", "failed to read managed auth for wham proxy", {
+        error: normalizeError(error).message,
+        path: authPath,
+      });
+      return null;
+    }
   }
 
   private readGlobalState(body: unknown): Record<string, unknown> {
@@ -1361,6 +2045,119 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         config: null,
       };
     }
+  }
+
+  private async readRecommendedSkills(_body: unknown): Promise<RecommendedSkillsResponse> {
+    const repoRoot = resolveRecommendedSkillsRepoRoot();
+
+    try {
+      return {
+        repoRoot,
+        skills: await listRecommendedSkills(repoRoot),
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return {
+          repoRoot,
+          skills: [],
+        };
+      }
+
+      const normalizedError = normalizeError(error);
+      debugLog("app-server", "failed to load recommended skills", {
+        error: normalizedError.message,
+        repoRoot,
+      });
+      return {
+        repoRoot,
+        skills: [],
+        error: "Unable to load recommended skills.",
+      };
+    }
+  }
+
+  private async handleLocalEnvironmentsRequest(body: unknown): Promise<unknown> {
+    const workspaceRoot =
+      readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot ?? this.cwd;
+    return await listLocalEnvironments(workspaceRoot);
+  }
+
+  private async handleLocalEnvironmentConfigRequest(body: unknown): Promise<unknown> {
+    const configPath = readLocalEnvironmentConfigPath(body);
+    if (configPath) {
+      return await readLocalEnvironmentConfig(configPath);
+    }
+
+    const workspaceRoot = readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot;
+    if (!workspaceRoot) {
+      throw new Error("Local environment workspace root is required.");
+    }
+
+    return await readLocalEnvironmentConfig(
+      join(workspaceRoot, ".codex", "environments", "environment.toml"),
+    );
+  }
+
+  private async handleLocalEnvironmentRequest(body: unknown): Promise<unknown> {
+    const configPath = readLocalEnvironmentConfigPath(body);
+    if (!configPath) {
+      throw new Error("Local environment config path is required.");
+    }
+
+    return await loadLocalEnvironment(configPath);
+  }
+
+  private async handleLocalEnvironmentConfigSaveRequest(body: unknown): Promise<unknown> {
+    const configPath = readLocalEnvironmentConfigPath(body);
+    if (!configPath) {
+      throw new Error("Local environment config path is required.");
+    }
+
+    const raw = readLocalEnvironmentRaw(body);
+    if (raw === null) {
+      throw new Error("Local environment config contents are required.");
+    }
+
+    return await saveLocalEnvironmentConfig(configPath, raw);
+  }
+
+  private async readCodexAgentsMarkdown(): Promise<{
+    path: string;
+    contents: string;
+  }> {
+    const path = resolveCodexAgentsMarkdownPath();
+
+    try {
+      return {
+        path,
+        contents: await readFile(path, "utf8"),
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return {
+          path,
+          contents: "",
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  private async writeCodexAgentsMarkdown(body: unknown): Promise<{
+    path: string;
+  }> {
+    const contents = readCodexAgentsMarkdownContents(body);
+    if (contents === null) {
+      throw new Error("Missing agents.md contents.");
+    }
+
+    const path = resolveCodexAgentsMarkdownPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, contents, "utf8");
+    return {
+      path,
+    };
   }
 
   private readDeveloperInstructions(body: unknown): string | null {
@@ -1408,6 +2205,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
     if (typeof params.threadId === "string") {
       sanitized.threadId = params.threadId;
+    }
+    const resumePath = readExistingAbsoluteThreadPath(params.path);
+    if (resumePath) {
+      sanitized.path = resumePath;
     }
     if (typeof params.cwd === "string") {
       sanitized.cwd = params.cwd;
@@ -1501,7 +2302,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const setActive = !isJsonRecord(body) || body.setActive !== false;
 
     if (!root) {
-      this.openDesktopImportDialog("manual");
+      this.openWorkspaceRootPicker("manual");
       return {
         success: false,
         root: "",
@@ -1620,11 +2421,131 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     return this.cwd.length > 0 ? [this.cwd] : [];
   }
 
-  private openDesktopImportDialog(mode: "first-run" | "manual"): void {
+  private openWorkspaceRootPicker(context: WorkspaceRootPickerContext): void {
     this.emitBridgeMessage({
-      type: "pocodex-open-desktop-import-dialog",
-      mode,
+      type: "pocodex-open-workspace-root-picker",
+      context,
+      initialPath: homedir(),
     });
+  }
+
+  private async handleWorkspaceRootOptionPicked(message: JsonRecord): Promise<void> {
+    const root = typeof message.root === "string" ? message.root : null;
+    if (!root) {
+      return;
+    }
+
+    try {
+      await this.confirmWorkspaceRootSelection(root, "manual");
+    } catch (error) {
+      debugLog("app-server", "failed to apply workspace-root-option-picked", {
+        error: normalizeError(error).message,
+        root,
+      });
+    }
+  }
+
+  private async confirmWorkspaceRootSelection(
+    path: string,
+    context: WorkspaceRootPickerContext,
+  ): Promise<{
+    action: "activated" | "added";
+    root: string;
+  }> {
+    const root = await this.resolveWorkspaceRootPickerDirectoryPath(
+      {
+        path,
+      },
+      {
+        fallbackToHome: false,
+        pathKey: "path",
+      },
+    );
+    const action: "activated" | "added" = this.workspaceRoots.has(root) ? "activated" : "added";
+
+    this.ensureWorkspaceRoot(root, {
+      setActive: true,
+    });
+    await this.persistWorkspaceRootRegistry();
+    this.emitWorkspaceRootsUpdated();
+
+    if (context === "onboarding") {
+      this.emitBridgeMessage({
+        type: "electron-onboarding-pick-workspace-or-create-default-result",
+        success: true,
+      });
+    }
+
+    return {
+      action,
+      root,
+    };
+  }
+
+  private readWorkspaceRootPickerContext(value: unknown): WorkspaceRootPickerContext {
+    return value === "onboarding" ? "onboarding" : "manual";
+  }
+
+  private async resolveWorkspaceRootPickerDirectoryPath(
+    params: unknown,
+    options: {
+      fallbackToHome: boolean;
+      pathKey: string;
+    },
+  ): Promise<string> {
+    const candidate =
+      isJsonRecord(params) && typeof params[options.pathKey] === "string"
+        ? (params[options.pathKey] as string)
+        : null;
+    const path = this.normalizeWorkspaceRootPickerPath(candidate, options.fallbackToHome);
+    const stats = await stat(path).catch((error) => {
+      throw normalizeWorkspaceRootPickerPathError(error);
+    });
+    if (!stats.isDirectory()) {
+      throw new Error("Choose an existing folder.");
+    }
+
+    try {
+      await readdir(path);
+    } catch (error) {
+      throw normalizeWorkspaceRootPickerPathError(error);
+    }
+
+    return path;
+  }
+
+  private normalizeWorkspaceRootPickerPath(
+    candidate: string | null,
+    fallbackToHome: boolean,
+  ): string {
+    const trimmedPath = candidate?.trim() ?? "";
+    const path =
+      trimmedPath.length > 0
+        ? expandWorkspaceRootPickerHome(trimmedPath)
+        : fallbackToHome
+          ? homedir()
+          : "";
+    if (!path) {
+      throw new Error("Folder path is required.");
+    }
+    if (!isAbsolute(path)) {
+      throw new Error("Folder path must be absolute.");
+    }
+
+    return resolve(path);
+  }
+
+  private getWorkspaceRootPickerParentPath(path: string): string | null {
+    const parentPath = dirname(path);
+    return parentPath === path ? null : parentPath;
+  }
+
+  private async isDirectory(path: string): Promise<boolean> {
+    try {
+      return (await stat(path)).isDirectory();
+    } catch {
+      return false;
+    }
   }
 
   private getSharedObjectKey(message: JsonRecord): string | null {
@@ -1654,15 +2575,23 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     };
   }
 
-  private emitFetchSuccess(requestId: string, body: unknown, status = 200): void {
+  private emitFetchSuccess(
+    requestId: string,
+    body: unknown,
+    status = 200,
+    headers?: Record<string, string>,
+  ): void {
     this.emit("bridge_message", {
       type: "fetch-response",
       requestId,
       responseType: "success",
       status,
-      headers: {
-        "content-type": "application/json",
-      },
+      headers:
+        headers && Object.keys(headers).length > 0
+          ? headers
+          : {
+              "content-type": "application/json",
+            },
       bodyJsonString: JSON.stringify(body),
     });
   }
@@ -1685,6 +2614,18 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
+  private async sendLocalRequestSafely(method: string, params?: unknown): Promise<unknown | null> {
+    try {
+      return await this.sendLocalRequest(method, params);
+    } catch (error) {
+      debugLog("app-server", "failed to handle local bridge request", {
+        error: normalizeError(error).message,
+        method,
+      });
+      return null;
+    }
+  }
+
   private async sendLocalRequest(method: string, params?: unknown): Promise<unknown> {
     const id = `pocodex-local-${++this.nextRequestId}`;
     return new Promise<unknown>((resolve, reject) => {
@@ -1700,6 +2641,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private rejectPendingRequests(error: Error): void {
     this.localRequests.forEach(({ reject }) => reject(error));
     this.localRequests.clear();
+    this.pendingMcpRequestMethods.clear();
   }
 
   private listExistingPaths(body: unknown): string[] {
@@ -1828,6 +2770,126 @@ async function resolveGitRepository(
   return repository;
 }
 
+async function isGhInstalled(cwd: string): Promise<boolean> {
+  const result = await execGhCommand(cwd, ["--version"]);
+  return result.ok;
+}
+
+async function isGhAuthenticated(cwd: string): Promise<boolean> {
+  const result = await execGhCommand(cwd, ["auth", "status", "--hostname", "github.com"]);
+  return result.ok;
+}
+
+async function readGhPrInfo(root: string): Promise<GhPrInfo | null> {
+  const fields = "isDraft,mergeable,state,url,statusCheckRollup";
+  const result = await execGhCommand(root, ["pr", "view", "--json", fields]);
+  if (!result.ok) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (!isJsonRecord(parsed)) {
+      return null;
+    }
+
+    return {
+      state: typeof parsed.state === "string" ? parsed.state : null,
+      isDraft: parsed.isDraft === true,
+      mergeable: typeof parsed.mergeable === "string" ? parsed.mergeable : null,
+      url: typeof parsed.url === "string" ? parsed.url : null,
+      statusCheckRollup: parsed.statusCheckRollup,
+    };
+  } catch (error) {
+    debugLog("app-server", "failed to parse gh pr view output", {
+      error: normalizeError(error).message,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+    return null;
+  }
+}
+
+function readGhTargetDirectory(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  if (!isJsonRecord(params)) {
+    return null;
+  }
+
+  if (typeof params.path === "string") {
+    return params.path;
+  }
+  if (typeof params.dir === "string") {
+    return params.dir;
+  }
+  if (typeof params.cwd === "string") {
+    return params.cwd;
+  }
+  if (typeof params.root === "string") {
+    return params.root;
+  }
+  if (typeof params.workspaceRoot === "string") {
+    return params.workspaceRoot;
+  }
+
+  return null;
+}
+
+function deriveGhCiStatus(statusCheckRollup: unknown): string | null {
+  if (!Array.isArray(statusCheckRollup) || statusCheckRollup.length === 0) {
+    return null;
+  }
+
+  let hasFailure = false;
+  let hasPending = false;
+  let hasSuccess = false;
+  for (const entry of statusCheckRollup) {
+    if (!isJsonRecord(entry)) {
+      continue;
+    }
+
+    const status = typeof entry.status === "string" ? entry.status.toUpperCase() : "";
+    const conclusion = typeof entry.conclusion === "string" ? entry.conclusion.toUpperCase() : "";
+
+    if (status && status !== "COMPLETED") {
+      hasPending = true;
+      continue;
+    }
+
+    if (!conclusion) {
+      hasPending = true;
+      continue;
+    }
+
+    if (["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion)) {
+      hasSuccess = true;
+      continue;
+    }
+
+    if (
+      ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"].includes(
+        conclusion,
+      )
+    ) {
+      hasFailure = true;
+      continue;
+    }
+
+    hasPending = true;
+  }
+
+  if (hasFailure) {
+    return "failure";
+  }
+  if (hasPending) {
+    return "pending";
+  }
+  if (hasSuccess) {
+    return "success";
+  }
+  return null;
+}
+
 async function listGitWorktreeRoots(root: string): Promise<string[]> {
   try {
     const output = await runGitCommand(root, ["worktree", "list", "--porcelain"]);
@@ -1875,6 +2937,46 @@ async function runGitCommand(cwd: string, args: string[]): Promise<string> {
   });
 }
 
+async function execGhCommand(
+  cwd: string,
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      "gh",
+      args,
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        env: {
+          ...process.env,
+          GH_PAGER: "cat",
+          GIT_PAGER: "cat",
+        },
+      },
+      (error, stdout, stderr) => {
+        const trimmedStdout = stdout.trim();
+        const trimmedStderr = stderr.trim();
+        if (error) {
+          resolve({
+            ok: false,
+            stdout: trimmedStdout,
+            stderr: trimmedStderr || normalizeError(error).message,
+          });
+          return;
+        }
+
+        resolve({
+          ok: true,
+          stdout: trimmedStdout,
+          stderr: trimmedStderr,
+        });
+      },
+    );
+  });
+}
+
 function extractJsonRpcErrorMessage(error: unknown): string {
   if (isJsonRecord(error) && typeof error.message === "string") {
     return error.message;
@@ -1883,6 +2985,201 @@ function extractJsonRpcErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function readUsageVisibilityPlanFromAccount(result: unknown): UsageVisibilityPlan | null {
+  const account = isJsonRecord(result) && isJsonRecord(result.account) ? result.account : null;
+  return normalizeUsageVisibilityPlan(account?.planType);
+}
+
+function normalizeUsageVisibilityPlan(planType: unknown): UsageVisibilityPlan | null {
+  switch (planType) {
+    case "plus":
+    case "pro":
+    case "prolite":
+      return planType;
+    default:
+      return null;
+  }
+}
+
+function buildWhamUsagePayload(result: unknown): WhamUsagePayload {
+  const emptyPayload = buildEmptyWhamUsagePayload();
+  if (!isJsonRecord(result)) {
+    return emptyPayload;
+  }
+
+  const rateLimits = normalizeLocalRateLimitSnapshot(result.rateLimits);
+  if (!hasLocalRateLimitSnapshotData(rateLimits)) {
+    return emptyPayload;
+  }
+
+  const additionalRateLimits = isJsonRecord(result.rateLimitsByLimitId)
+    ? Object.entries(result.rateLimitsByLimitId).flatMap(([limitId, snapshot]) =>
+        normalizeLimitId(limitId) === USAGE_CORE_LIMIT_ID
+          ? []
+          : buildAdditionalWhamRateLimitPayload(snapshot),
+      )
+    : [];
+
+  return {
+    credits: buildWhamCreditsPayload(rateLimits.credits),
+    plan_type: rateLimits.planType,
+    rate_limit_name: rateLimits.limitName,
+    rate_limit: buildWhamRateLimitPayload(rateLimits),
+    additional_rate_limits: additionalRateLimits,
+  };
+}
+
+function readExistingAbsoluteThreadPath(value: unknown): string | null {
+  if (typeof value !== "string" || !isAbsolute(value) || !existsSync(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function buildEmptyWhamUsagePayload(): WhamUsagePayload {
+  return {
+    credits: null,
+    plan_type: null,
+    rate_limit_name: null,
+    rate_limit: null,
+    additional_rate_limits: [],
+  };
+}
+
+function buildAdditionalWhamRateLimitPayload(snapshot: unknown): WhamAdditionalRateLimitPayload[] {
+  const normalizedSnapshot = normalizeLocalRateLimitSnapshot(snapshot);
+  if (!hasLocalRateLimitSnapshotData(normalizedSnapshot)) {
+    return [];
+  }
+
+  return [
+    {
+      limit_name: normalizedSnapshot.limitName,
+      rate_limit: buildWhamRateLimitPayload(normalizedSnapshot),
+    },
+  ];
+}
+
+function buildWhamCreditsPayload(
+  credits: LocalCreditsSnapshot | null,
+): WhamUsagePayload["credits"] {
+  if (!credits) {
+    return null;
+  }
+
+  return {
+    has_credits: credits.hasCredits,
+    unlimited: credits.unlimited,
+    balance: credits.balance,
+  };
+}
+
+function buildWhamRateLimitPayload(snapshot: LocalRateLimitSnapshot): WhamUsageRateLimitPayload {
+  const limitReached = isLocalRateLimitReached(snapshot);
+  return {
+    primary_window: buildWhamWindowPayload(snapshot.primary),
+    secondary_window: buildWhamWindowPayload(snapshot.secondary),
+    limit_reached: limitReached,
+    allowed: !limitReached,
+  };
+}
+
+function buildWhamWindowPayload(
+  window: LocalRateLimitWindowSnapshot | null,
+): WhamUsageWindowPayload | null {
+  if (!window) {
+    return null;
+  }
+
+  return {
+    used_percent: window.usedPercent,
+    limit_window_seconds:
+      window.windowDurationMins === null ? null : Math.round(window.windowDurationMins * 60),
+    reset_at: window.resetsAt,
+  };
+}
+
+function isLocalRateLimitReached(snapshot: LocalRateLimitSnapshot): boolean {
+  return [snapshot.primary, snapshot.secondary].some(
+    (window) => window !== null && window.usedPercent !== null && window.usedPercent >= 100,
+  );
+}
+
+function hasLocalRateLimitSnapshotData(
+  snapshot: LocalRateLimitSnapshot | null,
+): snapshot is LocalRateLimitSnapshot {
+  if (!snapshot) {
+    return false;
+  }
+
+  return (
+    snapshot.limitId !== null ||
+    snapshot.limitName !== null ||
+    snapshot.primary !== null ||
+    snapshot.secondary !== null ||
+    snapshot.credits !== null ||
+    snapshot.planType !== null
+  );
+}
+
+function normalizeLocalRateLimitSnapshot(value: unknown): LocalRateLimitSnapshot | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    limitId: readOptionalString(value.limitId),
+    limitName: readOptionalString(value.limitName),
+    primary: normalizeLocalRateLimitWindowSnapshot(value.primary),
+    secondary: normalizeLocalRateLimitWindowSnapshot(value.secondary),
+    credits: normalizeLocalCreditsSnapshot(value.credits),
+    planType: readOptionalString(value.planType),
+  };
+}
+
+function normalizeLocalRateLimitWindowSnapshot(
+  value: unknown,
+): LocalRateLimitWindowSnapshot | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    usedPercent: readOptionalNumber(value.usedPercent),
+    windowDurationMins: readOptionalNumber(value.windowDurationMins),
+    resetsAt: readOptionalNumber(value.resetsAt),
+  };
+}
+
+function normalizeLocalCreditsSnapshot(value: unknown): LocalCreditsSnapshot | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  return {
+    hasCredits: readOptionalBoolean(value.hasCredits),
+    unlimited: readOptionalBoolean(value.unlimited),
+    balance: readOptionalString(value.balance),
+  };
+}
+
+function normalizeLimitId(limitId: string): string {
+  return limitId.trim().toLowerCase();
+}
+
+function readOptionalString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function readOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
 }
 
 function parseJsonBody(body: unknown): unknown {
@@ -1909,6 +3206,23 @@ function parseResponseBody(bodyText: string): unknown {
   }
 }
 
+async function readRemoteFetchResponse(response: Response): Promise<RelativeFetchResponse> {
+  const bodyText = await response.text();
+  return {
+    status: response.status,
+    headers: readResponseHeaders(response.headers),
+    body: parseResponseBody(bodyText),
+  };
+}
+
+function readResponseHeaders(headers: Headers): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    normalized[key] = value;
+  });
+  return normalized;
+}
+
 function normalizeHeaders(headers: unknown): Record<string, string> | undefined {
   if (!isJsonRecord(headers)) {
     return undefined;
@@ -1921,6 +3235,34 @@ function normalizeHeaders(headers: unknown): Record<string, string> | undefined 
     }
   }
   return normalized;
+}
+
+function buildOutboundFetchHeaders(
+  headers: unknown,
+  body: unknown,
+): Record<string, string> | undefined {
+  const normalized = normalizeHeaders(headers) ?? {};
+
+  if (shouldInferJsonContentType(normalized, body)) {
+    normalized["content-type"] = "application/json";
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function shouldInferJsonContentType(headers: Record<string, string>, body: unknown): boolean {
+  if (typeof body !== "string") {
+    return false;
+  }
+
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === "content-type") {
+      return false;
+    }
+  }
+
+  const parsed = parseJsonBody(body);
+  return parsed !== null && typeof parsed === "object";
 }
 
 function normalizeRequestBody(body: unknown): BodyInit | undefined {
@@ -1936,8 +3278,358 @@ function normalizeRequestBody(body: unknown): BodyInit | undefined {
   return JSON.stringify(body);
 }
 
+function expandWorkspaceRootPickerHome(path: string): string {
+  if (path === "~") {
+    return homedir();
+  }
+  if (path.startsWith("~/")) {
+    return join(homedir(), path.slice(2));
+  }
+
+  return path;
+}
+
+function normalizeWorkspaceRootPickerPathError(error: unknown): Error {
+  if (isJsonRecord(error) && error.code === "ENOENT") {
+    return new Error("Choose an existing folder.");
+  }
+  if (isJsonRecord(error) && error.code === "EACCES") {
+    return new Error("That folder is not readable.");
+  }
+  if (isJsonRecord(error) && error.code === "ENOTDIR") {
+    return new Error("Choose an existing folder.");
+  }
+
+  return normalizeError(error);
+}
+
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function resolveCodexAgentsMarkdownPath(): string {
+  return join(deriveCodexHomePath(), "agents.md");
+}
+
+function resolveRecommendedSkillsRepoRoot(): string {
+  return join(deriveCodexHomePath(), "vendor_imports", "skills");
+}
+
+async function listRecommendedSkills(repoRoot: string): Promise<RecommendedSkill[]> {
+  const definitions = await listRecommendedSkillDefinitions(repoRoot);
+  const skills = await Promise.all(
+    definitions.map(async ({ repoPath, skillPath }) => {
+      const metadata = await readRecommendedSkillFrontmatter(skillPath);
+      const name = metadata.name ?? basename(repoPath);
+      const description = metadata.description ?? metadata.shortDescription ?? name;
+      return {
+        id: name,
+        name,
+        description,
+        shortDescription: metadata.shortDescription,
+        repoPath,
+        path: repoPath,
+        ...(metadata.iconSmall ? { iconSmall: metadata.iconSmall } : {}),
+        ...(metadata.iconLarge ? { iconLarge: metadata.iconLarge } : {}),
+      } satisfies RecommendedSkill;
+    }),
+  );
+
+  return skills.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function listRecommendedSkillDefinitions(
+  repoRoot: string,
+): Promise<Array<{ repoPath: string; skillPath: string }>> {
+  for (const candidateRoot of [
+    join(repoRoot, "skills", ".curated"),
+    join(repoRoot, ".curated"),
+    repoRoot,
+  ]) {
+    const definitions = await collectRecommendedSkillDefinitions(repoRoot, candidateRoot);
+    if (definitions.length > 0 || candidateRoot === repoRoot) {
+      return definitions;
+    }
+  }
+
+  return [];
+}
+
+async function collectRecommendedSkillDefinitions(
+  repoRoot: string,
+  directory: string,
+): Promise<Array<{ repoPath: string; skillPath: string }>> {
+  const entries = await readdir(directory, {
+    withFileTypes: true,
+  });
+  if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
+    const repoPath = normalizeRecommendedSkillRepoPath(relative(repoRoot, directory));
+    return [
+      {
+        repoPath,
+        skillPath: join(directory, "SKILL.md"),
+      },
+    ];
+  }
+
+  const discovered: Array<{ repoPath: string; skillPath: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) {
+      continue;
+    }
+
+    discovered.push(
+      ...(await collectRecommendedSkillDefinitions(repoRoot, join(directory, entry.name))),
+    );
+  }
+  return discovered;
+}
+
+function normalizeRecommendedSkillRepoPath(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+async function readRecommendedSkillFrontmatter(skillPath: string): Promise<{
+  name: string | null;
+  description: string | null;
+  shortDescription: string | null;
+  iconSmall: string | null;
+  iconLarge: string | null;
+}> {
+  const contents = await readFile(skillPath, "utf8");
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(contents);
+  if (!match) {
+    return {
+      name: null,
+      description: null,
+      shortDescription: null,
+      iconSmall: null,
+      iconLarge: null,
+    };
+  }
+
+  let activeSection: string | null = null;
+  let name: string | null = null;
+  let description: string | null = null;
+  let shortDescription: string | null = null;
+  let iconSmall: string | null = null;
+  let iconLarge: string | null = null;
+
+  for (const line of match[1].split(/\r?\n/)) {
+    const topLevelMatch = /^([A-Za-z0-9_-]+):(.*)$/.exec(line);
+    if (topLevelMatch) {
+      const key = topLevelMatch[1];
+      const value = normalizeFrontmatterScalar(topLevelMatch[2]);
+      activeSection = key === "metadata" && value === null ? "metadata" : null;
+
+      switch (normalizeFrontmatterKey(key)) {
+        case "name":
+          name = value;
+          break;
+        case "description":
+          description = value;
+          break;
+        case "shortdescription":
+          shortDescription = value;
+          break;
+        case "iconsmall":
+          iconSmall = value;
+          break;
+        case "iconlarge":
+          iconLarge = value;
+          break;
+        default:
+          break;
+      }
+      continue;
+    }
+
+    if (activeSection !== "metadata") {
+      continue;
+    }
+
+    const nestedMatch = /^\s+([A-Za-z0-9_-]+):(.*)$/.exec(line);
+    if (!nestedMatch) {
+      continue;
+    }
+
+    const key = normalizeFrontmatterKey(nestedMatch[1]);
+    const value = normalizeFrontmatterScalar(nestedMatch[2]);
+    if (key === "shortdescription") {
+      shortDescription = value;
+    }
+  }
+
+  return {
+    name,
+    description,
+    shortDescription,
+    iconSmall,
+    iconLarge,
+  };
+}
+
+function normalizeFrontmatterKey(key: string): string {
+  return key.replaceAll(/[\s_-]+/g, "").toLowerCase();
+}
+
+function normalizeFrontmatterScalar(rawValue: string): string | null {
+  const trimmed = rawValue.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  if (
+    (trimmed.startsWith(`"`) && trimmed.endsWith(`"`)) ||
+    (trimmed.startsWith(`'`) && trimmed.endsWith(`'`))
+  ) {
+    return trimmed.slice(1, -1).trim() || null;
+  }
+
+  return trimmed;
+}
+
+async function renderableImageUrlFromPath(
+  value: string,
+  basePaths: Array<string | null>,
+): Promise<string | null> {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  if (isWebRenderableImageUrl(trimmed)) {
+    return trimmed;
+  }
+
+  const filePath = await resolveLocalImageAssetPath(trimmed, basePaths);
+  if (!filePath) {
+    return null;
+  }
+
+  const mimeType = getImageMimeType(filePath);
+  if (!mimeType) {
+    return null;
+  }
+
+  const contents = await readFile(filePath);
+  return `data:${mimeType};base64,${contents.toString("base64")}`;
+}
+
+async function resolveLocalImageAssetPath(
+  assetPath: string,
+  basePaths: Array<string | null>,
+): Promise<string | null> {
+  if (isAbsolute(assetPath)) {
+    return (await isRegularFile(assetPath)) ? assetPath : null;
+  }
+
+  for (const basePath of basePaths) {
+    const resolvedBasePath = await resolveAssetBasePath(basePath);
+    if (!resolvedBasePath) {
+      continue;
+    }
+
+    const candidate = resolve(resolvedBasePath, assetPath);
+    if (await isRegularFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function resolveAssetBasePath(basePath: string | null): Promise<string | null> {
+  if (!basePath) {
+    return null;
+  }
+
+  try {
+    const fileStats = await stat(basePath);
+    return fileStats.isFile() ? dirname(basePath) : basePath;
+  } catch {
+    return looksLikeFilePath(basePath) ? dirname(basePath) : basePath;
+  }
+}
+
+async function isRegularFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isWebRenderableImageUrl(value: string): boolean {
+  return value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://");
+}
+
+function looksLikeFilePath(path: string): boolean {
+  return basename(path).includes(".");
+}
+
+function getImageMimeType(path: string): string | null {
+  switch (extname(path).toLowerCase()) {
+    case ".apng":
+      return "image/apng";
+    case ".avif":
+      return "image/avif";
+    case ".bmp":
+      return "image/bmp";
+    case ".gif":
+      return "image/gif";
+    case ".ico":
+      return "image/x-icon";
+    case ".jpeg":
+    case ".jpg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+function readCodexAgentsMarkdownContents(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  if (!isJsonRecord(params) || typeof params.contents !== "string") {
+    return null;
+  }
+
+  return params.contents;
+}
+
+function readLocalEnvironmentWorkspaceRoot(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.workspaceRoot === "string"
+    ? params.workspaceRoot
+    : null;
+}
+
+function readLocalEnvironmentConfigPath(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.configPath === "string" ? params.configPath : null;
+}
+
+function readLocalEnvironmentRaw(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.raw === "string" ? params.raw : null;
+}
+
+function readCodexFetchParams(body: unknown): unknown {
+  if (!isJsonRecord(body)) {
+    return body;
+  }
+
+  return isJsonRecord(body.params) ? body.params : body;
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return isJsonRecord(error) && error.code === "ENOENT";
 }
 
 function uniqueStrings(values: unknown[]): string[] {

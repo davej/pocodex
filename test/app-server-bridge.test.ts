@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,8 +19,12 @@ vi.mock("node-pty", () => ({
 }));
 
 let mockLocalThreadListData: unknown[] = [];
+const mockLocalRequestResults = new Map<string, unknown>();
+const mockLocalRequestErrors = new Map<string, string>();
+const mockLocalRequests: Array<{ method: string; params: unknown }> = [];
 const tempDirs: string[] = [];
 const mockPtys: MockPty[] = [];
+const originalCodexHome = process.env.CODEX_HOME;
 const originalShell = process.env.SHELL;
 const TEST_WORKSPACE_ROOT = process.cwd();
 const TEST_PROJECT_ALPHA_ROOT = join(TEST_WORKSPACE_ROOT, "..", "project-alpha");
@@ -79,54 +83,37 @@ class MockChildProcess extends EventEmitter {
           id?: string | number;
           method?: string;
         };
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          message.method === "initialize"
-        ) {
-          setImmediate(() => {
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                result: {
-                  ok: true,
-                },
-              })}\n`,
-            );
-          });
+        if (!String(message.id ?? "").startsWith("pocodex-local-")) {
+          continue;
         }
 
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          message.method === "config/read"
-        ) {
-          setImmediate(() => {
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                result: {
-                  ok: true,
-                },
-              })}\n`,
-            );
-          });
+        const localRequest =
+          typeof message.method === "string" ? buildMockLocalRequestResponse(message.method) : null;
+        if (!localRequest) {
+          continue;
         }
+        mockLocalRequests.push({
+          method: localRequest.method,
+          params: "params" in message ? message.params : undefined,
+        });
 
-        if (
-          String(message.id ?? "").startsWith("pocodex-local-") &&
-          message.method === "thread/list"
-        ) {
-          setImmediate(() => {
-            this.stdout.write(
-              `${JSON.stringify({
-                id: message.id,
-                result: {
-                  data: mockLocalThreadListData,
-                  nextCursor: null,
-                },
-              })}\n`,
-            );
-          });
-        }
+        setImmediate(() => {
+          const errorMessage = mockLocalRequestErrors.get(localRequest.method);
+          this.stdout.write(
+            `${JSON.stringify({
+              id: message.id,
+              ...(errorMessage
+                ? {
+                    error: {
+                      message: errorMessage,
+                    },
+                  }
+                : {
+                    result: localRequest.result,
+                  }),
+            })}\n`,
+          );
+        });
       }
     });
   }
@@ -228,7 +215,15 @@ describe("AppServerBridge", () => {
       await rm(directory, { recursive: true, force: true });
     }
     mockLocalThreadListData = [];
+    mockLocalRequestResults.clear();
+    mockLocalRequestErrors.clear();
+    mockLocalRequests.length = 0;
     mockPtys.length = 0;
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = originalCodexHome;
+    }
     process.env.SHELL = originalShell;
     vi.clearAllMocks();
   });
@@ -303,6 +298,229 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
+  it("converts plugin list artwork paths into data URLs", async () => {
+    const pluginRoot = await mkdtemp(join(tmpdir(), "pocodex-plugin-root-"));
+    tempDirs.push(pluginRoot);
+    const assetsPath = join(pluginRoot, "assets");
+    await mkdir(assetsPath, { recursive: true });
+
+    const logoSvg = `<svg xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" fill="#111"/></svg>`;
+    const composerSvg = `<svg xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="7" fill="#222"/></svg>`;
+    const screenshotSvg = `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h16v16H0z" fill="#333"/></svg>`;
+    const logoPath = join(assetsPath, "logo.svg");
+    const composerIconPath = join(assetsPath, "composer.svg");
+    const screenshotPath = join(assetsPath, "screenshot.svg");
+    await writeFile(logoPath, `${logoSvg}\n`, "utf8");
+    await writeFile(composerIconPath, `${composerSvg}\n`, "utf8");
+    await writeFile(screenshotPath, `${screenshotSvg}\n`, "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "req-plugin-list",
+        method: "plugin/list",
+        params: {},
+      },
+    });
+
+    const child = children.at(-1);
+    child?.stdout.write(
+      `${JSON.stringify({
+        id: "req-plugin-list",
+        result: {
+          marketplaces: [
+            {
+              name: "openai-curated",
+              path: join(pluginRoot, "marketplace"),
+              plugins: [
+                {
+                  id: "github",
+                  name: "github",
+                  authPolicy: "ON_INSTALL",
+                  enabled: true,
+                  installPolicy: "AVAILABLE",
+                  installed: true,
+                  source: {
+                    type: "local",
+                    path: pluginRoot,
+                  },
+                  interface: {
+                    capabilities: ["Interactive"],
+                    screenshots: [screenshotPath],
+                    displayName: "GitHub",
+                    logo: logoPath,
+                    composerIcon: composerIconPath,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      })}\n`,
+    );
+
+    await waitForCondition(() => Boolean(getMcpResponse(emittedMessages, "req-plugin-list")));
+
+    expect(getMcpJsonResult(emittedMessages, "req-plugin-list")).toEqual({
+      marketplaces: [
+        {
+          name: "openai-curated",
+          path: join(pluginRoot, "marketplace"),
+          plugins: [
+            {
+              id: "github",
+              name: "github",
+              authPolicy: "ON_INSTALL",
+              enabled: true,
+              installPolicy: "AVAILABLE",
+              installed: true,
+              source: {
+                type: "local",
+                path: pluginRoot,
+              },
+              interface: {
+                capabilities: ["Interactive"],
+                screenshots: [toSvgDataUrl(`${screenshotSvg}\n`)],
+                displayName: "GitHub",
+                logo: toSvgDataUrl(`${logoSvg}\n`),
+                composerIcon: toSvgDataUrl(`${composerSvg}\n`),
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await bridge.close();
+  });
+
+  it("converts plugin detail logos and skill icons into data URLs", async () => {
+    const pluginRoot = await mkdtemp(join(tmpdir(), "pocodex-plugin-root-"));
+    tempDirs.push(pluginRoot);
+    const assetsPath = join(pluginRoot, "assets");
+    const skillPath = join(pluginRoot, "skills", "demo");
+    await mkdir(assetsPath, { recursive: true });
+    await mkdir(skillPath, { recursive: true });
+
+    const logoSvg = `<svg xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" fill="#111"/></svg>`;
+    const iconSmallSvg = `<svg xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6" fill="#444"/></svg>`;
+    const iconLargeSvg = `<svg xmlns="http://www.w3.org/2000/svg"><path d="M2 2h12v12H2z" fill="#555"/></svg>`;
+    const logoPath = join(assetsPath, "logo.svg");
+    await writeFile(logoPath, `${logoSvg}\n`, "utf8");
+    await writeFile(join(skillPath, "icon-small.svg"), `${iconSmallSvg}\n`, "utf8");
+    await writeFile(join(skillPath, "icon-large.svg"), `${iconLargeSvg}\n`, "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "req-plugin-read",
+        method: "plugin/read",
+        params: {
+          marketplacePath: join(pluginRoot, "marketplace"),
+          pluginName: "github",
+        },
+      },
+    });
+
+    const child = children.at(-1);
+    child?.stdout.write(
+      `${JSON.stringify({
+        id: "req-plugin-read",
+        result: {
+          plugin: {
+            marketplaceName: "openai-curated",
+            marketplacePath: join(pluginRoot, "marketplace"),
+            mcpServers: [],
+            apps: [],
+            summary: {
+              id: "github",
+              name: "github",
+              authPolicy: "ON_INSTALL",
+              enabled: true,
+              installPolicy: "AVAILABLE",
+              installed: true,
+              source: {
+                type: "local",
+                path: pluginRoot,
+              },
+              interface: {
+                capabilities: ["Interactive"],
+                screenshots: [],
+                displayName: "GitHub",
+                logo: logoPath,
+              },
+            },
+            skills: [
+              {
+                name: "github",
+                description: "Triage GitHub work.",
+                path: "skills/demo/SKILL.md",
+                interface: {
+                  iconSmall: "./icon-small.svg",
+                  iconLarge: "./icon-large.svg",
+                },
+              },
+            ],
+          },
+        },
+      })}\n`,
+    );
+
+    await waitForCondition(() => Boolean(getMcpResponse(emittedMessages, "req-plugin-read")));
+
+    expect(getMcpJsonResult(emittedMessages, "req-plugin-read")).toEqual({
+      plugin: {
+        marketplaceName: "openai-curated",
+        marketplacePath: join(pluginRoot, "marketplace"),
+        mcpServers: [],
+        apps: [],
+        summary: {
+          id: "github",
+          name: "github",
+          authPolicy: "ON_INSTALL",
+          enabled: true,
+          installPolicy: "AVAILABLE",
+          installed: true,
+          source: {
+            type: "local",
+            path: pluginRoot,
+          },
+          interface: {
+            capabilities: ["Interactive"],
+            screenshots: [],
+            displayName: "GitHub",
+            logo: toSvgDataUrl(`${logoSvg}\n`),
+          },
+        },
+        skills: [
+          {
+            name: "github",
+            description: "Triage GitHub work.",
+            path: "skills/demo/SKILL.md",
+            interface: {
+              iconSmall: toSvgDataUrl(`${iconSmallSvg}\n`),
+              iconLarge: toSvgDataUrl(`${iconLargeSvg}\n`),
+            },
+          },
+        ],
+      },
+    });
+
+    await bridge.close();
+  });
+
   it("implements host fetch state for pinned threads and global state", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
@@ -359,7 +577,7 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
-  it("publishes shared object updates and workspace bootstrap responses", async () => {
+  it("publishes shared object updates and opens the onboarding workspace picker", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -413,8 +631,9 @@ describe("AppServerBridge", () => {
     });
 
     expect(emittedMessages).toContainEqual({
-      type: "electron-onboarding-pick-workspace-or-create-default-result",
-      success: true,
+      type: "pocodex-open-workspace-root-picker",
+      context: "onboarding",
+      initialPath: homedir(),
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-1")).toEqual({
@@ -626,7 +845,7 @@ describe("AppServerBridge", () => {
     );
   });
 
-  it("opens the desktop import dialog for add-project host actions", async () => {
+  it("opens the workspace root picker for add-project host actions", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -637,10 +856,163 @@ describe("AppServerBridge", () => {
       type: "electron-add-new-workspace-root-option",
     });
 
-    expect(emittedMessages).toContainEqual({
-      type: "pocodex-open-desktop-import-dialog",
-      mode: "manual",
+    await bridge.forwardBridgeMessage({
+      type: "electron-pick-workspace-root-option",
     });
+
+    expect(emittedMessages).toContainEqual({
+      type: "pocodex-open-workspace-root-picker",
+      context: "manual",
+      initialPath: homedir(),
+    });
+    expect(
+      emittedMessages.filter(
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: unknown }).type === "pocodex-open-workspace-root-picker",
+      ),
+    ).toHaveLength(2);
+
+    await bridge.close();
+  });
+
+  it("opens the workspace root picker when add-workspace-root-option is missing a root", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-add-root-missing",
+      method: "POST",
+      url: "vscode://codex/add-workspace-root-option",
+      body: JSON.stringify({}),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-add-root-missing")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-add-root-missing")).toEqual({
+      success: false,
+      root: "",
+    });
+    expect(emittedMessages).toContainEqual({
+      type: "pocodex-open-workspace-root-picker",
+      context: "manual",
+      initialPath: homedir(),
+    });
+
+    await bridge.close();
+  });
+
+  it("does not emit a top-level error when archiving a thread fails", async () => {
+    mockLocalRequestErrors.set("thread/archive", "Thread not found");
+    const bridge = await createBridge(children);
+    const errors: Error[] = [];
+    bridge.on("error", (error) => {
+      errors.push(error);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "archive-thread",
+      conversationId: "thr_test",
+      requestId: "archive-1",
+    });
+
+    await waitForCondition(() =>
+      (children.at(-1)?.writes ?? "").includes('"method":"thread/archive"'),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(errors).toEqual([]);
+
+    await bridge.close();
+  });
+
+  it("resolves archive requests for the desktop webview after archiving succeeds", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "archive-thread",
+      conversationId: "thr_test",
+      requestId: "archive-1",
+    });
+
+    await waitForCondition(() =>
+      emittedMessages.some(
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: unknown }).type === "serverRequest/resolved",
+      ),
+    );
+
+    expect(emittedMessages).toContainEqual({
+      type: "serverRequest/resolved",
+      params: {
+        threadId: "thr_test",
+        requestId: "archive-1",
+      },
+    });
+
+    await bridge.close();
+  });
+
+  it("handles archive mcp requests locally for the desktop webview", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    const child = children.at(-1);
+    const writesBefore = child?.writes ?? "";
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "req-archive-1",
+        method: "thread/archive",
+        params: {
+          threadId: "thr_test",
+        },
+      },
+    });
+
+    await waitForCondition(() =>
+      emittedMessages.some(
+        (message) =>
+          typeof message === "object" &&
+          message !== null &&
+          "type" in message &&
+          (message as { type?: unknown }).type === "mcp-response",
+      ),
+    );
+
+    expect(emittedMessages).toContainEqual({
+      type: "mcp-response",
+      hostId: "local",
+      message: {
+        id: "req-archive-1",
+        result: {
+          ok: true,
+        },
+      },
+    });
+    expect((child?.writes ?? "").slice(writesBefore.length)).not.toContain('"id":"req-archive-1"');
+    expect((child?.writes ?? "").slice(writesBefore.length)).not.toContain(
+      '"method":"thread/archive"',
+    );
 
     await bridge.close();
   });
@@ -846,52 +1218,56 @@ describe("AppServerBridge", () => {
     await secondBridge.close();
   });
 
-  it("lists Codex desktop projects for import through IPC", async () => {
-    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-desktop-import-"));
+  it("lists workspace root picker directories and defaults to the host home directory", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
     tempDirs.push(tempDirectory);
-    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
-    const importedProjectRoot = join(tempDirectory, "imported-project");
-    const codexDesktopGlobalStatePath = await writeDesktopGlobalState(tempDirectory, {
-      roots: [TEST_WORKSPACE_ROOT, importedProjectRoot],
-      activeRoots: [importedProjectRoot],
-      labels: {
-        [importedProjectRoot]: "Imported Project",
-      },
-    });
+    await mkdir(join(tempDirectory, "beta"), { recursive: true });
+    await mkdir(join(tempDirectory, "Alpha"), { recursive: true });
+    await writeFile(join(tempDirectory, "README.md"), "fixture\n", "utf8");
 
-    const bridge = await createBridge(children, {
-      workspaceRootRegistryPath,
-      codexDesktopGlobalStatePath,
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-home",
+        method: "workspace-root-picker/list",
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-home",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: homedir(),
+        parentPath: dirname(homedir()) === homedir() ? null : dirname(homedir()),
+        homePath: homedir(),
+        entries: expect.any(Array),
+      },
     });
 
     await expect(
       bridge.handleIpcRequest({
-        requestId: "ipc-1",
-        method: "desktop-workspace-import/list",
+        requestId: "ipc-list",
+        method: "workspace-root-picker/list",
+        params: {
+          path: tempDirectory,
+        },
       }),
     ).resolves.toEqual({
-      requestId: "ipc-1",
+      requestId: "ipc-list",
       type: "response",
       resultType: "success",
       result: {
-        found: true,
-        path: codexDesktopGlobalStatePath,
-        promptSeen: false,
-        shouldPrompt: true,
-        projects: [
+        currentPath: tempDirectory,
+        parentPath: dirname(tempDirectory),
+        homePath: homedir(),
+        entries: [
           {
-            root: TEST_WORKSPACE_ROOT,
-            label: "pocodex",
-            activeInCodex: false,
-            alreadyImported: false,
-            available: true,
+            name: "Alpha",
+            path: join(tempDirectory, "Alpha"),
           },
           {
-            root: importedProjectRoot,
-            label: "Imported Project",
-            activeInCodex: true,
-            alreadyImported: false,
-            available: true,
+            name: "beta",
+            path: join(tempDirectory, "beta"),
           },
         ],
       },
@@ -900,22 +1276,151 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
-  it("imports selected Codex desktop projects and persists prompt dismissal", async () => {
-    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-desktop-import-"));
+  it("rejects invalid workspace root picker paths", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
     tempDirs.push(tempDirectory);
-    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
-    const importedProjectRoot = join(tempDirectory, "imported-project");
-    const codexDesktopGlobalStatePath = await writeDesktopGlobalState(tempDirectory, {
-      roots: [TEST_WORKSPACE_ROOT, importedProjectRoot],
-      activeRoots: [importedProjectRoot],
-      labels: {
-        [importedProjectRoot]: "Imported Project",
+    const filePath = join(tempDirectory, "file.txt");
+    await writeFile(filePath, "fixture\n", "utf8");
+
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-relative",
+        method: "workspace-root-picker/list",
+        params: {
+          path: "relative/path",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-relative",
+      type: "response",
+      resultType: "error",
+      error: "Folder path must be absolute.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-file",
+        method: "workspace-root-picker/list",
+        params: {
+          path: filePath,
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-file",
+      type: "response",
+      resultType: "error",
+      error: "Choose an existing folder.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-root",
+        method: "workspace-root-picker/list",
+        params: {
+          path: "/",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-root",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: "/",
+        parentPath: null,
+        homePath: homedir(),
+        entries: expect.any(Array),
       },
     });
 
+    await bridge.close();
+  });
+
+  it("creates workspace root picker directories and rejects invalid names", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "new-project",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: join(tempDirectory, "new-project"),
+      },
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create-empty",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "  ",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create-empty",
+      type: "response",
+      resultType: "error",
+      error: "Folder name cannot be empty.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create-invalid",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "nested/path",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create-invalid",
+      type: "response",
+      resultType: "error",
+      error: "Folder name cannot contain path separators.",
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-create-existing",
+        method: "workspace-root-picker/create-directory",
+        params: {
+          parentPath: tempDirectory,
+          name: "new-project",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-create-existing",
+      type: "response",
+      resultType: "error",
+      error: "That folder already exists.",
+    });
+
+    await bridge.close();
+  });
+
+  it("confirms new workspace root picker selections, persists them, and emits updates", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectRoot = join(tempDirectory, "project-alpha");
+    await mkdir(projectRoot, { recursive: true });
+
     const bridge = await createBridge(children, {
       workspaceRootRegistryPath,
-      codexDesktopGlobalStatePath,
     });
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -924,20 +1429,20 @@ describe("AppServerBridge", () => {
 
     await expect(
       bridge.handleIpcRequest({
-        requestId: "ipc-apply",
-        method: "desktop-workspace-import/apply",
+        requestId: "ipc-confirm",
+        method: "workspace-root-picker/confirm",
         params: {
-          roots: [importedProjectRoot],
+          path: projectRoot,
+          context: "manual",
         },
       }),
     ).resolves.toEqual({
-      requestId: "ipc-apply",
+      requestId: "ipc-confirm",
       type: "response",
       resultType: "success",
       result: {
-        importedRoots: [importedProjectRoot],
-        skippedRoots: [],
-        promptSeen: true,
+        action: "added",
+        root: projectRoot,
       },
     });
 
@@ -947,48 +1452,177 @@ describe("AppServerBridge", () => {
     expect(emittedMessages).toContainEqual({
       type: "active-workspace-roots-updated",
     });
-
     await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
-      '"desktopImportPromptSeen": true',
+      `"activeRoot": "${projectRoot}"`,
     );
+
+    await bridge.close();
+  });
+
+  it("activates existing workspace root picker selections without duplicating roots", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const alphaRoot = join(tempDirectory, "alpha");
+    const betaRoot = join(tempDirectory, "beta");
+    await mkdir(alphaRoot, { recursive: true });
+    await mkdir(betaRoot, { recursive: true });
+    const workspaceRootRegistryPath = await writeWorkspaceRootRegistry(tempDirectory, {
+      roots: [alphaRoot, betaRoot],
+      activeRoot: betaRoot,
+    });
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
 
     await expect(
       bridge.handleIpcRequest({
-        requestId: "ipc-list",
-        method: "desktop-workspace-import/list",
+        requestId: "ipc-confirm-existing",
+        method: "workspace-root-picker/confirm",
+        params: {
+          path: alphaRoot,
+          context: "manual",
+        },
       }),
     ).resolves.toEqual({
-      requestId: "ipc-list",
+      requestId: "ipc-confirm-existing",
       type: "response",
       resultType: "success",
       result: {
-        found: true,
-        path: codexDesktopGlobalStatePath,
-        promptSeen: true,
-        shouldPrompt: false,
-        projects: [
-          {
-            root: TEST_WORKSPACE_ROOT,
-            label: "pocodex",
-            activeInCodex: false,
-            alreadyImported: false,
-            available: true,
-          },
-          {
-            root: importedProjectRoot,
-            label: "Imported Project",
-            activeInCodex: true,
-            alreadyImported: true,
-            available: true,
-          },
-        ],
+        action: "activated",
+        root: alphaRoot,
       },
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-active-roots-after-confirm",
+      method: "POST",
+      url: "vscode://codex/active-workspace-roots",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-active-roots-after-confirm")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-active-roots-after-confirm")).toEqual({
+      roots: [alphaRoot, betaRoot],
+    });
+    await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
+      `"activeRoot": "${alphaRoot}"`,
+    );
+
+    await bridge.close();
+  });
+
+  it("emits onboarding success and failure for workspace root picker confirm and cancel", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectRoot = join(tempDirectory, "project-onboarding");
+    await mkdir(projectRoot, { recursive: true });
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-confirm-onboarding",
+        method: "workspace-root-picker/confirm",
+        params: {
+          path: projectRoot,
+          context: "onboarding",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-confirm-onboarding",
+      type: "response",
+      resultType: "success",
+      result: {
+        action: "added",
+        root: projectRoot,
+      },
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "electron-onboarding-pick-workspace-or-create-default-result",
+      success: true,
+    });
+
+    emittedMessages.length = 0;
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-cancel-onboarding",
+        method: "workspace-root-picker/cancel",
+        params: {
+          context: "onboarding",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-cancel-onboarding",
+      type: "response",
+      resultType: "success",
+      result: {
+        cancelled: true,
+      },
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "electron-onboarding-pick-workspace-or-create-default-result",
+      success: false,
     });
 
     await bridge.close();
   });
 
+  it("supports workspace-root-option-picked as a compatibility path", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
+    const projectRoot = join(tempDirectory, "project-picked");
+    await mkdir(projectRoot, { recursive: true });
+
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "workspace-root-option-picked",
+      root: projectRoot,
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "workspace-root-options-updated",
+    });
+    expect(emittedMessages).toContainEqual({
+      type: "active-workspace-roots-updated",
+    });
+    await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
+      `"activeRoot": "${projectRoot}"`,
+    );
+
+    await bridge.close();
+  });
+
   it("returns empty-state host metadata and reports existing paths", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -1045,7 +1679,21 @@ describe("AppServerBridge", () => {
       }),
     });
 
-    await waitForCondition(() => emittedMessages.length >= 4);
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ide-context",
+      method: "POST",
+      url: "vscode://codex/ide-context",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-recommended-skills",
+      method: "POST",
+      url: "vscode://codex/recommended-skills",
+    });
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-ide-context")));
 
     expect(getFetchJsonBody(emittedMessages, "fetch-os")).toMatchObject({
       platform: expect.any(String),
@@ -1054,7 +1702,7 @@ describe("AppServerBridge", () => {
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-home")).toEqual({
-      codexHome: expect.stringContaining("/.codex"),
+      codexHome,
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-copilot")).toEqual({});
@@ -1070,6 +1718,477 @@ describe("AppServerBridge", () => {
     expect(getFetchJsonBody(emittedMessages, "fetch-paths")).toEqual({
       existingPaths: [TEST_WORKSPACE_ROOT],
     });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-recommended-skills")).toEqual({
+      repoRoot: join(codexHome, "vendor_imports", "skills"),
+      skills: [],
+    });
+
+    expect(getFetchResponse(emittedMessages, "fetch-ide-context")).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-ide-context",
+      responseType: "error",
+      status: 503,
+      error: "IDE context is unavailable in Pocodex.",
+    });
+
+    await bridge.close();
+  });
+
+  it("lists curated recommended skills from vendor imports", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+
+    const repoRoot = join(codexHome, "vendor_imports", "skills");
+    const createPlanSkillPath = join(repoRoot, "skills", ".curated", "create-plan");
+    const lintReviewSkillPath = join(repoRoot, "skills", ".curated", "lint-review");
+    await mkdir(createPlanSkillPath, { recursive: true });
+    await mkdir(lintReviewSkillPath, { recursive: true });
+    await writeFile(
+      join(createPlanSkillPath, "SKILL.md"),
+      `---
+name: create-plan
+description: Create a concise implementation plan.
+metadata:
+  short-description: Create a plan
+icon-small: ./icon-small.svg
+icon-large: ./icon-large.svg
+---
+
+# Create Plan
+`,
+      "utf8",
+    );
+    await writeFile(
+      join(lintReviewSkillPath, "SKILL.md"),
+      `---
+name: lint-review
+description: Review lint issues quickly.
+---
+
+# Lint Review
+`,
+      "utf8",
+    );
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-recommended-skills",
+      method: "POST",
+      url: "vscode://codex/recommended-skills",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-recommended-skills")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-recommended-skills")).toEqual({
+      repoRoot,
+      skills: [
+        {
+          id: "create-plan",
+          name: "create-plan",
+          description: "Create a concise implementation plan.",
+          shortDescription: "Create a plan",
+          repoPath: "skills/.curated/create-plan",
+          path: "skills/.curated/create-plan",
+          iconSmall: "./icon-small.svg",
+          iconLarge: "./icon-large.svg",
+        },
+        {
+          id: "lint-review",
+          name: "lint-review",
+          description: "Review lint issues quickly.",
+          shortDescription: null,
+          repoPath: "skills/.curated/lint-review",
+          path: "skills/.curated/lint-review",
+        },
+      ],
+    });
+
+    await bridge.close();
+  });
+
+  it("reads and writes personal agents.md content from codex home", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    const agentsPath = join(codexHome, "agents.md");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-agents-read-empty",
+      method: "POST",
+      url: "vscode://codex/codex-agents-md",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-agents-save",
+      method: "POST",
+      url: "vscode://codex/codex-agents-md-save",
+      body: JSON.stringify({
+        params: {
+          contents: "Use concise output.\n",
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-agents-read-saved",
+      method: "POST",
+      url: "vscode://codex/codex-agents-md",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-agents-read-saved")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-agents-read-empty")).toEqual({
+      path: agentsPath,
+      contents: "",
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-agents-save")).toEqual({
+      path: agentsPath,
+    });
+
+    expect(await readFile(agentsPath, "utf8")).toBe("Use concise output.\n");
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-agents-read-saved")).toEqual({
+      path: agentsPath,
+      contents: "Use concise output.\n",
+    });
+
+    await bridge.close();
+  });
+
+  it("lists local environments for a workspace root using the webview contract", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-local-environments-"));
+    tempDirs.push(tempDirectory);
+    const projectRoot = join(tempDirectory, "project-gamma");
+    await mkdir(join(projectRoot, ".codex", "environments"), { recursive: true });
+    const environmentPath = join(projectRoot, ".codex", "environments", "environment.toml");
+    await writeFile(
+      environmentPath,
+      [
+        "# THIS IS AUTOGENERATED. DO NOT EDIT MANUALLY",
+        'name = "Project Gamma"',
+        "version = 1",
+        "",
+        "[setup]",
+        'script = "pnpm install"',
+        "",
+        "[setup.linux]",
+        'script = "pnpm install --frozen-lockfile"',
+        "",
+        "[cleanup]",
+        'script = "pnpm cleanup"',
+        "",
+        "[[actions]]",
+        'name = "Run dev"',
+        'icon = "run"',
+        'command = "pnpm dev"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environments-list",
+      method: "POST",
+      url: "vscode://codex/local-environments",
+      body: JSON.stringify({
+        params: {
+          workspaceRoot: projectRoot,
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-local-environments-list")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environments-list")).toEqual({
+      environments: [
+        {
+          configPath: environmentPath,
+          exists: true,
+          type: "success",
+          environment: {
+            name: "Project Gamma",
+            version: 1,
+            setup: {
+              script: "pnpm install",
+              linux: {
+                script: "pnpm install --frozen-lockfile",
+              },
+            },
+            cleanup: {
+              script: "pnpm cleanup",
+            },
+            actions: [
+              {
+                name: "Run dev",
+                icon: "run",
+                command: "pnpm dev",
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    await bridge.close();
+  });
+
+  it("reports parse errors for a broken local environment without failing the fetch", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-local-environments-"));
+    tempDirs.push(tempDirectory);
+    const projectRoot = join(tempDirectory, "project-delta");
+    await mkdir(join(projectRoot, ".codex", "environments"), { recursive: true });
+    const environmentPath = join(projectRoot, ".codex", "environments", "environment.toml");
+    await writeFile(
+      environmentPath,
+      [
+        "# THIS IS AUTOGENERATED. DO NOT EDIT MANUALLY",
+        'name = "Broken"',
+        "[setup",
+        'script = "pnpm install"',
+      ].join("\n"),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-broken-list",
+      method: "POST",
+      url: "vscode://codex/local-environments",
+      body: JSON.stringify({
+        params: {
+          workspaceRoot: projectRoot,
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-broken-config",
+      method: "POST",
+      url: "vscode://codex/local-environment-config",
+      body: JSON.stringify({
+        params: {
+          configPath: environmentPath,
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-broken-read",
+      method: "POST",
+      url: "vscode://codex/local-environment",
+      body: JSON.stringify({
+        params: {
+          configPath: environmentPath,
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-local-environment-broken-read")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environment-broken-list")).toEqual({
+      environments: [
+        {
+          configPath: environmentPath,
+          exists: true,
+          type: "error",
+          error: {
+            message: expect.any(String),
+          },
+        },
+      ],
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environment-broken-config")).toEqual({
+      configPath: environmentPath,
+      exists: true,
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environment-broken-read")).toEqual({
+      environment: {
+        type: "error",
+        error: {
+          message: expect.any(String),
+        },
+      },
+    });
+
+    await bridge.close();
+  });
+
+  it("saves raw local environment TOML through the config-save endpoint", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-local-environments-"));
+    tempDirs.push(tempDirectory);
+    const projectRoot = join(tempDirectory, "project-epsilon");
+    await mkdir(projectRoot, { recursive: true });
+    const environmentPath = join(projectRoot, ".codex", "environments", "environment.toml");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-config-missing",
+      method: "POST",
+      url: "vscode://codex/local-environment-config",
+      body: JSON.stringify({
+        params: {
+          configPath: environmentPath,
+        },
+      }),
+    });
+
+    const rawEnvironment = [
+      'name = "Project Epsilon"',
+      "version = 1",
+      "",
+      "[setup]",
+      'script = "pnpm install"',
+      "",
+      "[setup.darwin]",
+      'script = "pnpm install:mac"',
+      "",
+      "[cleanup]",
+      'script = "pnpm cleanup"',
+      "",
+      "[cleanup.linux]",
+      'script = "pnpm cleanup:linux"',
+      "",
+      "[[actions]]",
+      'name = "Run dev"',
+      'icon = "run"',
+      'command = "pnpm dev"',
+      "",
+      "[[actions]]",
+      'name = "Test"',
+      'icon = "test"',
+      'command = "pnpm test"',
+      'platform = "linux"',
+      "",
+    ].join("\n");
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-config-save",
+      method: "POST",
+      url: "vscode://codex/local-environment-config-save",
+      body: JSON.stringify({
+        params: {
+          configPath: environmentPath,
+          raw: rawEnvironment,
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-read-saved",
+      method: "POST",
+      url: "vscode://codex/local-environment",
+      body: JSON.stringify({
+        params: {
+          configPath: environmentPath,
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-local-environment-read-saved")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environment-config-missing")).toEqual({
+      configPath: environmentPath,
+      exists: false,
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environment-config-save")).toEqual({
+      configPath: environmentPath,
+      exists: true,
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-local-environment-read-saved")).toEqual({
+      environment: {
+        type: "success",
+        environment: {
+          name: "Project Epsilon",
+          version: 1,
+          setup: {
+            script: "pnpm install",
+            darwin: {
+              script: "pnpm install:mac",
+            },
+          },
+          cleanup: {
+            script: "pnpm cleanup",
+            linux: {
+              script: "pnpm cleanup:linux",
+            },
+          },
+          actions: [
+            {
+              name: "Run dev",
+              icon: "run",
+              command: "pnpm dev",
+            },
+            {
+              name: "Test",
+              icon: "test",
+              command: "pnpm test",
+              platform: "linux",
+            },
+          ],
+        },
+      },
+    });
+
+    const savedFile = await readFile(environmentPath, "utf8");
+    expect(savedFile).toContain("# THIS IS AUTOGENERATED. DO NOT EDIT MANUALLY");
+    expect(savedFile).toContain('name = "Project Epsilon"');
+    expect(savedFile).toContain("[cleanup.linux]");
+    expect(savedFile).toContain('platform = "linux"');
 
     await bridge.close();
   });
@@ -1244,65 +2363,533 @@ describe("AppServerBridge", () => {
     }
   });
 
-  it("stubs wham endpoints locally instead of proxying to chatgpt.com", async () => {
+  it("proxies wham endpoints through backend-api with managed auth", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    await writeCodexAuthFile(codexHome, {
+      accessToken: "test-access-token",
+      accountId: "acct_personal",
+    });
+
+    const proxiedRequests: Array<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string | null;
+    }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = {
+        url: String(input),
+        method: init?.method ?? "GET",
+        headers: normalizeFetchRequestHeaders(init?.headers),
+        body: normalizeFetchRequestBody(init?.body),
+      };
+      proxiedRequests.push(request);
+
+      if (request.url === "https://chatgpt.com/backend-api/wham/environments") {
+        return createJsonResponse([{ id: "env_1", name: "Default" }]);
+      }
+      if (
+        request.url ===
+        "https://chatgpt.com/backend-api/wham/tasks/list?limit=20&task_filter=current"
+      ) {
+        return createJsonResponse({
+          items: [{ id: "task_1", status: "running" }],
+          cursor: "cursor_1",
+        });
+      }
+      if (request.url === "https://chatgpt.com/backend-api/wham/accounts/check") {
+        return createJsonResponse({
+          accounts: [{ id: "acct_personal", status: "active" }],
+          account_ordering: ["acct_personal"],
+          default_account_id: "acct_personal",
+        });
+      }
+      if (request.url === "https://chatgpt.com/backend-api/wham/usage") {
+        return createJsonResponse({
+          plan_type: "plus",
+          credits: null,
+        });
+      }
+      if (request.url === "https://chatgpt.com/backend-api/wham/tasks") {
+        return createJsonResponse(
+          {
+            id: "task_new",
+            status: "queued",
+          },
+          201,
+        );
+      }
+
+      throw new Error(`Unexpected proxied fetch: ${request.url}`);
+    });
+
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
 
-    await bridge.forwardBridgeMessage({
-      type: "fetch",
-      requestId: "fetch-wham-environments",
-      method: "GET",
-      url: "/wham/environments",
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-environments",
+        method: "GET",
+        url: "/wham/environments",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-tasks",
+        method: "GET",
+        url: "/wham/tasks/list?limit=20&task_filter=current",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-accounts",
+        method: "GET",
+        url: "/wham/accounts/check",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-create-task",
+        method: "POST",
+        url: "/wham/tasks",
+        headers: {
+          "x-test-header": "keep-me",
+        },
+        body: JSON.stringify({
+          prompt: "ship it",
+        }),
+      });
+
+      await waitForCondition(() =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-wham-create-task")),
+      );
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([
+        {
+          id: "env_1",
+          name: "Default",
+        },
+      ]);
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-tasks")).toEqual({
+        items: [{ id: "task_1", status: "running" }],
+        cursor: "cursor_1",
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-accounts")).toEqual({
+        accounts: [{ id: "acct_personal", status: "active" }],
+        account_ordering: ["acct_personal"],
+        default_account_id: "acct_personal",
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
+        plan_type: "plus",
+        credits: null,
+      });
+      expect(getFetchResponse(emittedMessages, "fetch-wham-create-task")).toMatchObject({
+        status: 201,
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-create-task")).toEqual({
+        id: "task_new",
+        status: "queued",
+      });
+
+      expect(proxiedRequests.map((request) => request.url)).toEqual([
+        "https://chatgpt.com/backend-api/wham/environments",
+        "https://chatgpt.com/backend-api/wham/tasks/list?limit=20&task_filter=current",
+        "https://chatgpt.com/backend-api/wham/accounts/check",
+        "https://chatgpt.com/backend-api/wham/usage",
+        "https://chatgpt.com/backend-api/wham/tasks",
+      ]);
+
+      for (const request of proxiedRequests) {
+        expect(request.headers.authorization).toBe("Bearer test-access-token");
+        expect(request.headers["chatgpt-account-id"]).toBe("acct_personal");
+        expect(request.headers.originator).toBe("codex_cli_rs");
+      }
+
+      expect(proxiedRequests.at(-1)).toMatchObject({
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "ship it",
+        }),
+      });
+      expect(proxiedRequests.at(-1)?.headers["content-type"]).toBe("application/json");
+      expect(proxiedRequests.at(-1)?.headers["x-test-header"]).toBe("keep-me");
+      expect(fetchSpy).toHaveBeenCalledTimes(5);
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "managed auth file is missing",
+      auth: null,
+    },
+    {
+      name: "managed auth is missing an access token",
+      auth: {
+        accountId: "acct_personal",
+      },
+    },
+    {
+      name: "managed auth is missing an account id",
+      auth: {
+        accessToken: "test-access-token",
+      },
+    },
+  ])("falls back to local placeholder wham responses when $name", async ({ auth }) => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+
+    if (auth) {
+      await writeCodexAuthFile(codexHome, auth);
+    }
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-environments",
+        method: "GET",
+        url: "/wham/environments",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-tasks",
+        method: "GET",
+        url: "/wham/tasks/list?limit=20&task_filter=current",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-accounts",
+        method: "GET",
+        url: "/wham/accounts/check",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-wham-usage")));
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([]);
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-tasks")).toEqual({
+        items: [],
+        tasks: [],
+        nextCursor: null,
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-accounts")).toEqual({
+        accounts: [],
+        account_ordering: [],
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
+        credits: null,
+        plan_type: null,
+        rate_limit_name: null,
+        rate_limit: null,
+        additional_rate_limits: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it("refreshes managed auth and retries wham requests once after a 401", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    await writeCodexAuthFile(codexHome, {
+      accessToken: "stale-access-token",
+      accountId: "acct_stale",
+    });
+
+    const proxiedRequests: Array<{ headers: Record<string, string> }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const headers = normalizeFetchRequestHeaders(init?.headers);
+      proxiedRequests.push({ headers });
+
+      if (headers.authorization === "Bearer stale-access-token") {
+        await writeCodexAuthFile(codexHome, {
+          accessToken: "fresh-access-token",
+          accountId: "acct_fresh",
+        });
+        return createJsonResponse(
+          {
+            error: "expired",
+          },
+          401,
+        );
+      }
+
+      if (headers.authorization === "Bearer fresh-access-token") {
+        return createJsonResponse([{ id: "env_1" }]);
+      }
+
+      throw new Error("Unexpected auth header");
+    });
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-environments",
+        method: "GET",
+        url: "/wham/environments",
+      });
+
+      await waitForCondition(() =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-wham-environments")),
+      );
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([
+        {
+          id: "env_1",
+        },
+      ]);
+      expect(proxiedRequests).toHaveLength(2);
+      expect(proxiedRequests[0]?.headers.authorization).toBe("Bearer stale-access-token");
+      expect(proxiedRequests[1]?.headers.authorization).toBe("Bearer fresh-access-token");
+      expect(mockLocalRequests).toContainEqual({
+        method: "account/read",
+        params: {
+          refreshToken: true,
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it("returns a safe local usage fallback when account rate limits cannot be read", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+    mockLocalRequestErrors.set("account/rateLimits/read", "rate limits unavailable");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage-fallback",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await waitForCondition(() => emittedMessages.length >= 1);
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage-fallback")).toEqual({
+        credits: null,
+        plan_type: null,
+        rate_limit_name: null,
+        rate_limit: null,
+        additional_rate_limits: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it("reads account info from the local app server and filters unsupported plans", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    mockLocalRequestResults.set("account/read", {
+      account: {
+        planType: "plus",
+      },
     });
 
     await bridge.forwardBridgeMessage({
       type: "fetch",
-      requestId: "fetch-wham-tasks",
-      method: "GET",
-      url: "/wham/tasks/list?limit=20&task_filter=current",
+      requestId: "fetch-account-plus",
+      method: "POST",
+      url: "vscode://codex/account-info",
     });
 
-    await waitForCondition(() => emittedMessages.length >= 2);
-
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-environments")).toEqual([]);
-
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-tasks")).toEqual({
-      items: [],
-      tasks: [],
-      nextCursor: null,
+    mockLocalRequestResults.set("account/read", {
+      account: {
+        planType: "enterprise",
+      },
     });
 
     await bridge.forwardBridgeMessage({
       type: "fetch",
-      requestId: "fetch-wham-accounts",
-      method: "GET",
-      url: "/wham/accounts/check",
+      requestId: "fetch-account-unsupported",
+      method: "POST",
+      url: "vscode://codex/account-info",
     });
+
+    mockLocalRequestErrors.set("account/read", "account unavailable");
 
     await bridge.forwardBridgeMessage({
       type: "fetch",
-      requestId: "fetch-wham-usage",
-      method: "GET",
-      url: "/wham/usage",
+      requestId: "fetch-account-error",
+      method: "POST",
+      url: "vscode://codex/account-info",
     });
 
-    await waitForCondition(() => emittedMessages.length >= 4);
+    await waitForCondition(() => emittedMessages.length >= 3);
 
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-accounts")).toEqual({
-      accounts: [],
-      account_ordering: [],
+    expect(getFetchJsonBody(emittedMessages, "fetch-account-plus")).toEqual({
+      plan: "plus",
     });
-
-    expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage")).toEqual({
-      credits: null,
-      plan_type: null,
-      rate_limit: null,
+    expect(getFetchJsonBody(emittedMessages, "fetch-account-unsupported")).toEqual({
+      plan: null,
+    });
+    expect(getFetchJsonBody(emittedMessages, "fetch-account-error")).toEqual({
+      plan: null,
     });
 
     await bridge.close();
+  });
+
+  it("serves read-only billing endpoints locally and blocks unsupported billing actions", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-settings",
+        method: "GET",
+        url: "/subscriptions/auto_top_up/settings",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-accounts-check-versioned",
+        method: "GET",
+        url: "/accounts/check/v4-2023-04-27",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-pricing-config",
+        method: "GET",
+        url: "/checkout_pricing_config/configs/USD",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-enable",
+        method: "POST",
+        url: "/subscriptions/auto_top_up/enable",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-update",
+        method: "POST",
+        url: "/subscriptions/auto_top_up/update",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-auto-top-up-disable",
+        method: "POST",
+        url: "/subscriptions/auto_top_up/disable",
+      });
+
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-customer-portal",
+        method: "GET",
+        url: "/payments/customer_portal",
+      });
+
+      await waitForCondition(() => emittedMessages.length >= 7);
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-auto-top-up-settings")).toEqual({
+        is_enabled: false,
+        recharge_threshold: null,
+        recharge_target: null,
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-accounts-check-versioned")).toEqual({
+        accounts: {},
+      });
+      expect(getFetchJsonBody(emittedMessages, "fetch-pricing-config")).toEqual({
+        currency_config: null,
+      });
+
+      for (const requestId of [
+        "fetch-auto-top-up-enable",
+        "fetch-auto-top-up-update",
+        "fetch-auto-top-up-disable",
+        "fetch-customer-portal",
+      ]) {
+        expect(getFetchResponse(emittedMessages, requestId)).toMatchObject({
+          type: "fetch-response",
+          requestId,
+          responseType: "success",
+          status: 501,
+        });
+        expect(getFetchJsonBody(emittedMessages, requestId)).toEqual({
+          error: "unsupported in Pocodex",
+        });
+      }
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
   });
 
   it("delegates git worker messages through the desktop worker bridge", async () => {
@@ -1401,6 +2988,9 @@ describe("AppServerBridge", () => {
   it("sanitizes desktop-specific thread resume params before forwarding", async () => {
     const bridge = await createBridge(children);
     const child = children.at(0);
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-thread-resume-"));
+    tempDirs.push(tempDirectory);
+    const missingThreadPath = join(tempDirectory, "missing-thread.jsonl");
 
     await bridge.forwardBridgeMessage({
       type: "mcp-request",
@@ -1413,7 +3003,7 @@ describe("AppServerBridge", () => {
           config: {
             analytics: "",
           },
-          path: "/tmp/thread.jsonl",
+          path: missingThreadPath,
           history: null,
           modelProvider: "codex_vscode_copilot",
           sandbox: "workspace-write",
@@ -1428,6 +3018,37 @@ describe("AppServerBridge", () => {
     expect(forwarded).not.toContain('"config"');
     expect(forwarded).not.toContain('"modelProvider"');
     expect(forwarded).not.toContain('"path"');
+
+    await bridge.close();
+  });
+
+  it("preserves an existing local thread resume path", async () => {
+    const bridge = await createBridge(children);
+    const child = children.at(0);
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-thread-resume-"));
+    tempDirs.push(tempDirectory);
+    const threadPath = join(tempDirectory, "thread.jsonl");
+    await writeFile(threadPath, '{"type":"thread"}\n', "utf8");
+
+    await bridge.forwardBridgeMessage({
+      type: "mcp-request",
+      request: {
+        id: "resume-2",
+        method: "thread/resume",
+        params: {
+          threadId: "thr_123",
+          path: threadPath,
+          cwd: TEST_WORKSPACE_ROOT,
+          modelProvider: "codex_vscode_copilot",
+        },
+      },
+    });
+
+    const forwarded = child?.writes ?? "";
+    expect(forwarded).toContain('"method":"thread/resume"');
+    expect(forwarded).toContain('"threadId":"thr_123"');
+    expect(forwarded).toContain(`"path":"${threadPath}"`);
+    expect(forwarded).not.toContain('"modelProvider"');
 
     await bridge.close();
   });
@@ -1495,7 +3116,6 @@ describe("AppServerBridge", () => {
 async function createBridge(
   children: MockChildProcess[],
   options: {
-    codexDesktopGlobalStatePath?: string;
     persistedAtomRegistryPath?: string;
     workspaceRootRegistryPath?: string;
     gitWorkerBridge?: FakeGitWorkerBridge;
@@ -1523,43 +3143,119 @@ async function createBridge(
   }
   return AppServerBridge.connect({
     appPath: "/Applications/Codex.app",
+    codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
-    codexDesktopGlobalStatePath: options.codexDesktopGlobalStatePath,
     persistedAtomRegistryPath: options.persistedAtomRegistryPath,
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,
   });
 }
 
-async function writeDesktopGlobalState(
-  tempDirectory: string,
-  state: {
-    roots: string[];
-    activeRoots?: string[];
-    labels?: Record<string, string>;
+function buildMockLocalRequestResponse(method: string): {
+  method: string;
+  result: unknown;
+} | null {
+  switch (method) {
+    case "initialize":
+    case "config/read":
+      return {
+        method,
+        result: {
+          ok: true,
+        },
+      };
+    case "thread/list":
+      return {
+        method,
+        result: {
+          data: mockLocalThreadListData,
+          nextCursor: null,
+        },
+      };
+    case "thread/archive":
+    case "thread/unarchive":
+      return {
+        method,
+        result: {
+          ok: true,
+        },
+      };
+    case "account/read":
+      return {
+        method,
+        result: mockLocalRequestResults.get(method) ?? {
+          account: {
+            planType: null,
+          },
+        },
+      };
+    case "account/rateLimits/read":
+      return {
+        method,
+        result: mockLocalRequestResults.get(method) ?? {
+          rateLimits: null,
+          rateLimitsByLimitId: {},
+        },
+      };
+    default:
+      return null;
+  }
+}
+
+async function writeCodexAuthFile(
+  codexHome: string,
+  auth: {
+    accessToken?: string;
+    accountId?: string;
   },
 ): Promise<string> {
-  const statePath = join(tempDirectory, ".codex-global-state.json");
-
-  for (const root of state.roots) {
-    await mkdir(root, { recursive: true });
-  }
-
+  const authPath = join(codexHome, "auth.json");
   await writeFile(
-    statePath,
+    authPath,
     `${JSON.stringify(
       {
-        "electron-saved-workspace-roots": state.roots,
-        "active-workspace-roots": state.activeRoots ?? [],
-        "electron-workspace-root-labels": state.labels ?? {},
+        tokens: {
+          access_token: auth.accessToken,
+          account_id: auth.accountId,
+        },
       },
       null,
       2,
     )}\n`,
     "utf8",
   );
+  return authPath;
+}
 
-  return statePath;
+function createJsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+    },
+  });
+}
+
+function normalizeFetchRequestHeaders(headers: HeadersInit | undefined): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  const requestHeaders = new Headers(headers);
+  requestHeaders.forEach((value, key) => {
+    normalized[key] = value;
+  });
+  return normalized;
+}
+
+function normalizeFetchRequestBody(body: BodyInit | null | undefined): string | null {
+  if (typeof body === "string") {
+    return body;
+  }
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body).toString("utf8");
+  }
+  if (body === null || body === undefined) {
+    return null;
+  }
+  throw new Error(`Unsupported fetch request body in test: ${body.constructor.name}`);
 }
 
 function getFetchResponse(messages: unknown[], requestId: string) {
@@ -1572,6 +3268,40 @@ function getFetchResponse(messages: unknown[], requestId: string) {
       (message as { type?: unknown }).type === "fetch-response" &&
       (message as { requestId?: unknown }).requestId === requestId,
   );
+}
+
+function getMcpResponse(messages: unknown[], requestId: string) {
+  return messages.find(
+    (message) =>
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      "message" in message &&
+      (message as { type?: unknown }).type === "mcp-response" &&
+      typeof (message as { message?: unknown }).message === "object" &&
+      (message as { message: { id?: unknown } }).message.id === requestId,
+  );
+}
+
+function getMcpJsonResult(messages: unknown[], requestId: string) {
+  const response = getMcpResponse(messages, requestId);
+  if (
+    !response ||
+    typeof response !== "object" ||
+    response === null ||
+    !("message" in response) ||
+    typeof response.message !== "object" ||
+    response.message === null ||
+    !("result" in response.message)
+  ) {
+    throw new Error(`Missing MCP response for ${requestId}`);
+  }
+
+  return response.message.result;
+}
+
+function toSvgDataUrl(contents: string): string {
+  return `data:image/svg+xml;base64,${Buffer.from(contents).toString("base64")}`;
 }
 
 function isBridgeMessage<TType extends string>(
