@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { ensureCodexCliBinary } from "./codex-bundle.js";
@@ -158,6 +158,23 @@ interface GhPrInfo {
   mergeable: string | null;
   url: string | null;
   statusCheckRollup: unknown;
+}
+
+interface RecommendedSkill {
+  id: string;
+  name: string;
+  description: string;
+  shortDescription: string | null;
+  repoPath: string;
+  path: string;
+  iconSmall?: string;
+  iconLarge?: string;
+}
+
+interface RecommendedSkillsResponse {
+  repoRoot: string;
+  skills: RecommendedSkill[];
+  error?: string;
 }
 
 type UsageVisibilityPlan = "plus" | "pro" | "prolite";
@@ -1416,9 +1433,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "recommended-skills":
         return {
           status: 200,
-          body: {
-            skills: [],
-          },
+          body: await this.readRecommendedSkills(body),
         };
       case "fast-mode-rollout-metrics":
         return {
@@ -1848,6 +1863,35 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       });
       return {
         config: null,
+      };
+    }
+  }
+
+  private async readRecommendedSkills(_body: unknown): Promise<RecommendedSkillsResponse> {
+    const repoRoot = resolveRecommendedSkillsRepoRoot();
+
+    try {
+      return {
+        repoRoot,
+        skills: await listRecommendedSkills(repoRoot),
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return {
+          repoRoot,
+          skills: [],
+        };
+      }
+
+      const normalizedError = normalizeError(error);
+      debugLog("app-server", "failed to load recommended skills", {
+        error: normalizedError.message,
+        repoRoot,
+      });
+      return {
+        repoRoot,
+        skills: [],
+        error: "Unable to load recommended skills.",
       };
     }
   }
@@ -3084,6 +3128,184 @@ function normalizeError(error: unknown): Error {
 
 function resolveCodexAgentsMarkdownPath(): string {
   return join(deriveCodexHomePath(), "agents.md");
+}
+
+function resolveRecommendedSkillsRepoRoot(): string {
+  return join(deriveCodexHomePath(), "vendor_imports", "skills");
+}
+
+async function listRecommendedSkills(repoRoot: string): Promise<RecommendedSkill[]> {
+  const definitions = await listRecommendedSkillDefinitions(repoRoot);
+  const skills = await Promise.all(
+    definitions.map(async ({ repoPath, skillPath }) => {
+      const metadata = await readRecommendedSkillFrontmatter(skillPath);
+      const name = metadata.name ?? basename(repoPath);
+      const description = metadata.description ?? metadata.shortDescription ?? name;
+      return {
+        id: name,
+        name,
+        description,
+        shortDescription: metadata.shortDescription,
+        repoPath,
+        path: repoPath,
+        ...(metadata.iconSmall ? { iconSmall: metadata.iconSmall } : {}),
+        ...(metadata.iconLarge ? { iconLarge: metadata.iconLarge } : {}),
+      } satisfies RecommendedSkill;
+    }),
+  );
+
+  return skills.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function listRecommendedSkillDefinitions(
+  repoRoot: string,
+): Promise<Array<{ repoPath: string; skillPath: string }>> {
+  for (const candidateRoot of [
+    join(repoRoot, "skills", ".curated"),
+    join(repoRoot, ".curated"),
+    repoRoot,
+  ]) {
+    const definitions = await collectRecommendedSkillDefinitions(repoRoot, candidateRoot);
+    if (definitions.length > 0 || candidateRoot === repoRoot) {
+      return definitions;
+    }
+  }
+
+  return [];
+}
+
+async function collectRecommendedSkillDefinitions(
+  repoRoot: string,
+  directory: string,
+): Promise<Array<{ repoPath: string; skillPath: string }>> {
+  const entries = await readdir(directory, {
+    withFileTypes: true,
+  });
+  if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
+    const repoPath = normalizeRecommendedSkillRepoPath(relative(repoRoot, directory));
+    return [
+      {
+        repoPath,
+        skillPath: join(directory, "SKILL.md"),
+      },
+    ];
+  }
+
+  const discovered: Array<{ repoPath: string; skillPath: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) {
+      continue;
+    }
+
+    discovered.push(
+      ...(await collectRecommendedSkillDefinitions(repoRoot, join(directory, entry.name))),
+    );
+  }
+  return discovered;
+}
+
+function normalizeRecommendedSkillRepoPath(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+async function readRecommendedSkillFrontmatter(skillPath: string): Promise<{
+  name: string | null;
+  description: string | null;
+  shortDescription: string | null;
+  iconSmall: string | null;
+  iconLarge: string | null;
+}> {
+  const contents = await readFile(skillPath, "utf8");
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(contents);
+  if (!match) {
+    return {
+      name: null,
+      description: null,
+      shortDescription: null,
+      iconSmall: null,
+      iconLarge: null,
+    };
+  }
+
+  let activeSection: string | null = null;
+  let name: string | null = null;
+  let description: string | null = null;
+  let shortDescription: string | null = null;
+  let iconSmall: string | null = null;
+  let iconLarge: string | null = null;
+
+  for (const line of match[1].split(/\r?\n/)) {
+    const topLevelMatch = /^([A-Za-z0-9_-]+):(.*)$/.exec(line);
+    if (topLevelMatch) {
+      const key = topLevelMatch[1];
+      const value = normalizeFrontmatterScalar(topLevelMatch[2]);
+      activeSection = key === "metadata" && value === null ? "metadata" : null;
+
+      switch (normalizeFrontmatterKey(key)) {
+        case "name":
+          name = value;
+          break;
+        case "description":
+          description = value;
+          break;
+        case "shortdescription":
+          shortDescription = value;
+          break;
+        case "iconsmall":
+          iconSmall = value;
+          break;
+        case "iconlarge":
+          iconLarge = value;
+          break;
+        default:
+          break;
+      }
+      continue;
+    }
+
+    if (activeSection !== "metadata") {
+      continue;
+    }
+
+    const nestedMatch = /^\s+([A-Za-z0-9_-]+):(.*)$/.exec(line);
+    if (!nestedMatch) {
+      continue;
+    }
+
+    const key = normalizeFrontmatterKey(nestedMatch[1]);
+    const value = normalizeFrontmatterScalar(nestedMatch[2]);
+    if (key === "shortdescription") {
+      shortDescription = value;
+    }
+  }
+
+  return {
+    name,
+    description,
+    shortDescription,
+    iconSmall,
+    iconLarge,
+  };
+}
+
+function normalizeFrontmatterKey(key: string): string {
+  return key.replaceAll(/[\s_-]+/g, "").toLowerCase();
+}
+
+function normalizeFrontmatterScalar(rawValue: string): string | null {
+  const trimmed = rawValue.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  if (
+    (trimmed.startsWith(`"`) && trimmed.endsWith(`"`)) ||
+    (trimmed.startsWith(`'`) && trimmed.endsWith(`'`))
+  ) {
+    return trimmed.slice(1, -1).trim() || null;
+  }
+
+  return trimmed;
 }
 
 function readCodexAgentsMarkdownContents(body: unknown): string | null {

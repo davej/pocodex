@@ -1396,6 +1396,10 @@ describe("AppServerBridge", () => {
   });
 
   it("returns empty-state host metadata and reports existing paths", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -1459,6 +1463,13 @@ describe("AppServerBridge", () => {
       url: "vscode://codex/ide-context",
     });
 
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-recommended-skills",
+      method: "POST",
+      url: "vscode://codex/recommended-skills",
+    });
+
     await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-ide-context")));
 
     expect(getFetchJsonBody(emittedMessages, "fetch-os")).toMatchObject({
@@ -1468,7 +1479,7 @@ describe("AppServerBridge", () => {
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-home")).toEqual({
-      codexHome: expect.stringContaining("/.codex"),
+      codexHome,
     });
 
     expect(getFetchJsonBody(emittedMessages, "fetch-copilot")).toEqual({});
@@ -1485,12 +1496,98 @@ describe("AppServerBridge", () => {
       existingPaths: [TEST_WORKSPACE_ROOT],
     });
 
+    expect(getFetchJsonBody(emittedMessages, "fetch-recommended-skills")).toEqual({
+      repoRoot: join(codexHome, "vendor_imports", "skills"),
+      skills: [],
+    });
+
     expect(getFetchResponse(emittedMessages, "fetch-ide-context")).toMatchObject({
       type: "fetch-response",
       requestId: "fetch-ide-context",
       responseType: "error",
       status: 503,
       error: "IDE context is unavailable in Pocodex.",
+    });
+
+    await bridge.close();
+  });
+
+  it("lists curated recommended skills from vendor imports", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+
+    const repoRoot = join(codexHome, "vendor_imports", "skills");
+    const createPlanSkillPath = join(repoRoot, "skills", ".curated", "create-plan");
+    const lintReviewSkillPath = join(repoRoot, "skills", ".curated", "lint-review");
+    await mkdir(createPlanSkillPath, { recursive: true });
+    await mkdir(lintReviewSkillPath, { recursive: true });
+    await writeFile(
+      join(createPlanSkillPath, "SKILL.md"),
+      `---
+name: create-plan
+description: Create a concise implementation plan.
+metadata:
+  short-description: Create a plan
+icon-small: ./icon-small.svg
+icon-large: ./icon-large.svg
+---
+
+# Create Plan
+`,
+      "utf8",
+    );
+    await writeFile(
+      join(lintReviewSkillPath, "SKILL.md"),
+      `---
+name: lint-review
+description: Review lint issues quickly.
+---
+
+# Lint Review
+`,
+      "utf8",
+    );
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-recommended-skills",
+      method: "POST",
+      url: "vscode://codex/recommended-skills",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-recommended-skills")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-recommended-skills")).toEqual({
+      repoRoot,
+      skills: [
+        {
+          id: "create-plan",
+          name: "create-plan",
+          description: "Create a concise implementation plan.",
+          shortDescription: "Create a plan",
+          repoPath: "skills/.curated/create-plan",
+          path: "skills/.curated/create-plan",
+          iconSmall: "./icon-small.svg",
+          iconLarge: "./icon-large.svg",
+        },
+        {
+          id: "lint-review",
+          name: "lint-review",
+          description: "Review lint issues quickly.",
+          shortDescription: null,
+          repoPath: "skills/.curated/lint-review",
+          path: "skills/.curated/lint-review",
+        },
+      ],
     });
 
     await bridge.close();
