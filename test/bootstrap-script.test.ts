@@ -530,22 +530,6 @@ function readBootstrapFetchBody(fetchCall: { input: unknown; init: unknown } | u
   return (fetchCall.init as { body: string }).body;
 }
 
-function matchesPersistedAtomUpdate(envelope: unknown, key: string): boolean {
-  return (
-    typeof envelope === "object" &&
-    envelope !== null &&
-    "type" in envelope &&
-    envelope.type === "bridge_message" &&
-    "message" in envelope &&
-    typeof envelope.message === "object" &&
-    envelope.message !== null &&
-    "type" in envelope.message &&
-    envelope.message.type === "persisted-atom-update" &&
-    "key" in envelope.message &&
-    envelope.message.key === key
-  );
-}
-
 function setMobileSidebarOpenState(contentPane: TestElement, navigation?: TestElement): void {
   contentPane.style.width = "calc(100% - var(--spacing-token-sidebar))";
   contentPane.style.transform = "translateX(var(--spacing-token-sidebar))";
@@ -859,7 +843,12 @@ describe("renderBootstrapScript", () => {
   });
 
   it("offers reconnect and reload actions from the connection status overlay", async () => {
-    const harness = createBootstrapHarness({ mobile: true });
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "expanded",
+      },
+    });
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -2215,7 +2204,7 @@ describe("renderBootstrapScript", () => {
     });
   });
 
-  it("restores the desktop sidebar mode from host persisted atoms and persists later changes", async () => {
+  it("restores the desktop sidebar mode from browser storage and persists later changes", async () => {
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -2226,7 +2215,11 @@ describe("renderBootstrapScript", () => {
       stylesheetHref: "/pocodex.css",
     });
 
-    const harness = createBootstrapHarness();
+    const harness = createBootstrapHarness({
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "collapsed",
+      },
+    });
     const contentPane = harness.document.createElement("div");
     contentPane.setAttribute("class", "main-surface");
     contentPane.setBoundingClientRect({ left: 300, width: 980 });
@@ -2239,16 +2232,6 @@ describe("renderBootstrapScript", () => {
     await flushBootstrapMicrotasks();
     harness.openSocket();
 
-    harness.emitServerEnvelope({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-sync",
-        state: {
-          "pocodex-sidebar-mode": "collapsed",
-        },
-      },
-    });
-
     drainTestTimers(harness.timers, 1);
 
     expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
@@ -2256,26 +2239,13 @@ describe("renderBootstrapScript", () => {
     contentPane.setBoundingClientRect({ left: 0, width: 1280 });
     drainTestTimers(harness.timers);
 
-    const persistedUpdatesBeforeToggle = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdatesBeforeToggle).toHaveLength(0);
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
 
     contentPane.setBoundingClientRect({ left: 300, width: 980 });
     harness.document.dispatchEvent(new TestMouseEvent("click", { target: toggleButton }));
     drainTestTimers(harness.timers);
 
-    const persistedUpdates = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdates).toContainEqual({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-update",
-        key: "pocodex-sidebar-mode",
-        value: "expanded",
-      },
-    });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("expanded");
   });
 
   it("keeps the desktop sidebar expanded when no host mode has been stored", async () => {
@@ -2323,7 +2293,11 @@ describe("renderBootstrapScript", () => {
       stylesheetHref: "/pocodex.css",
     });
 
-    const harness = createBootstrapHarness();
+    const harness = createBootstrapHarness({
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "collapsed",
+      },
+    });
     const contentPane = harness.document.createElement("div");
     contentPane.setAttribute("class", "main-surface left-token-sidebar");
     contentPane.setBoundingClientRect({ left: 300, width: 980 });
@@ -2332,16 +2306,6 @@ describe("renderBootstrapScript", () => {
     harness.run(script);
     await flushBootstrapMicrotasks();
     harness.openSocket();
-
-    harness.emitServerEnvelope({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-sync",
-        state: {
-          "pocodex-sidebar-mode": "collapsed",
-        },
-      },
-    });
 
     drainTestTimers(harness.timers, 1);
     expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
@@ -2369,13 +2333,10 @@ describe("renderBootstrapScript", () => {
     );
     expect(toggleMessages).toHaveLength(2);
 
-    const persistedUpdates = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdates).toHaveLength(0);
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
   });
 
-  it("restores the mobile sidebar mode from host persisted atoms and persists later changes", async () => {
+  it("migrates the sidebar mode from host persisted atoms when browser storage is empty", async () => {
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -2386,17 +2347,11 @@ describe("renderBootstrapScript", () => {
       stylesheetHref: "/pocodex.css",
     });
 
-    const harness = createBootstrapHarness({ mobile: true });
-    const navigation = harness.document.createElement("nav");
-    navigation.setAttribute("role", "navigation");
+    const harness = createBootstrapHarness();
     const contentPane = harness.document.createElement("div");
     contentPane.setAttribute("class", "main-surface");
-    const toggleButton = harness.document.createElement("button");
-    toggleButton.setAttribute("aria-label", "Show sidebar");
-    harness.document.body.appendChild(navigation);
+    contentPane.setBoundingClientRect({ left: 300, width: 980 });
     harness.document.body.appendChild(contentPane);
-    harness.document.body.appendChild(toggleButton);
-    setMobileSidebarOpenState(contentPane, navigation);
 
     harness.run(script);
     await flushBootstrapMicrotasks();
@@ -2413,6 +2368,44 @@ describe("renderBootstrapScript", () => {
     });
 
     drainTestTimers(harness.timers, 1);
+
+    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
+  });
+
+  it("restores the mobile sidebar mode from browser storage and persists later changes", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "collapsed",
+      },
+    });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    const toggleButton = harness.document.createElement("button");
+    toggleButton.setAttribute("aria-label", "Show sidebar");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    harness.document.body.appendChild(toggleButton);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    drainTestTimers(harness.timers, 1);
     expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
 
     contentPane.style.width = "100%";
@@ -2421,26 +2414,13 @@ describe("renderBootstrapScript", () => {
     navigation.setBoundingClientRect({ left: 0, width: 240 });
     drainTestTimers(harness.timers);
 
-    const persistedUpdatesBeforeToggle = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdatesBeforeToggle).toHaveLength(0);
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
 
     setMobileSidebarOpenState(contentPane, navigation);
     harness.document.dispatchEvent(new TestMouseEvent("click", { target: toggleButton }));
     drainTestTimers(harness.timers);
 
-    const persistedUpdates = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdates).toContainEqual({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-update",
-        key: "pocodex-sidebar-mode",
-        value: "expanded",
-      },
-    });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("expanded");
   });
 
   it("defaults the mobile sidebar to expanded when no host mode has been stored", async () => {
@@ -2454,7 +2434,12 @@ describe("renderBootstrapScript", () => {
       stylesheetHref: "/pocodex.css",
     });
 
-    const harness = createBootstrapHarness({ mobile: true });
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "expanded",
+      },
+    });
     const navigation = harness.document.createElement("nav");
     navigation.setAttribute("role", "navigation");
     const contentPane = harness.document.createElement("div");
@@ -2490,7 +2475,12 @@ describe("renderBootstrapScript", () => {
       stylesheetHref: "/pocodex.css",
     });
 
-    const harness = createBootstrapHarness({ mobile: true });
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "expanded",
+      },
+    });
     const navigation = harness.document.createElement("nav");
     navigation.setAttribute("role", "navigation");
     const contentPane = harness.document.createElement("div");
@@ -2504,16 +2494,6 @@ describe("renderBootstrapScript", () => {
     harness.run(script);
     await flushBootstrapMicrotasks();
     harness.openSocket();
-
-    harness.emitServerEnvelope({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-sync",
-        state: {
-          "pocodex-sidebar-mode": "expanded",
-        },
-      },
-    });
 
     drainTestTimers(harness.timers);
     harness.dispatchedMessages.length = 0;
@@ -2539,17 +2519,7 @@ describe("renderBootstrapScript", () => {
     );
     expect(toggleMessages).toHaveLength(1);
 
-    const persistedUpdates = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdates).toContainEqual({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-update",
-        key: "pocodex-sidebar-mode",
-        value: "collapsed",
-      },
-    });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
   });
 
   it("reapplies the stored mobile sidebar mode when the shell resets after restore", async () => {
@@ -2563,7 +2533,12 @@ describe("renderBootstrapScript", () => {
       stylesheetHref: "/pocodex.css",
     });
 
-    const harness = createBootstrapHarness({ mobile: true });
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "collapsed",
+      },
+    });
     const navigation = harness.document.createElement("nav");
     navigation.setAttribute("role", "navigation");
     const contentPane = harness.document.createElement("div");
@@ -2575,16 +2550,6 @@ describe("renderBootstrapScript", () => {
     harness.run(script);
     await flushBootstrapMicrotasks();
     harness.openSocket();
-
-    harness.emitServerEnvelope({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-sync",
-        state: {
-          "pocodex-sidebar-mode": "collapsed",
-        },
-      },
-    });
 
     drainTestTimers(harness.timers, 1);
     expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
@@ -2610,10 +2575,7 @@ describe("renderBootstrapScript", () => {
     );
     expect(toggleMessages).toHaveLength(2);
 
-    const persistedUpdates = harness
-      .getSentEnvelopes()
-      .filter((envelope) => matchesPersistedAtomUpdate(envelope, "pocodex-sidebar-mode"));
-    expect(persistedUpdates).toHaveLength(0);
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
   });
 
   it("does not re-toggle the mobile sidebar while a restore transition is still settling", async () => {

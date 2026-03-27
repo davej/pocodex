@@ -91,7 +91,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   const RETRY_DELAYS_MS = [1000, 2000, 5000, 8000, 12000] as const;
   const SESSION_CHECK_PATH = "/session-check";
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
-  const SIDEBAR_MODE_PERSISTED_ATOM_KEY = "pocodex-sidebar-mode";
+  const LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY = "pocodex-sidebar-mode";
   const SIDEBAR_INTERACTION_ARM_MS = 500;
   const SIDEBAR_MODE_TOGGLE_SETTLE_MS = 350;
   const HEARTBEAT_STALE_AFTER_MS = 45_000;
@@ -386,6 +386,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function installSidebarModePersistence(): void {
+    sidebarModeFromHost = readSidebarModeFromBrowserStorage();
+    hasReceivedSidebarModeSync = sidebarModeFromHost !== null;
     document.addEventListener("click", handleSidebarClick, true);
     document.addEventListener("keydown", handleSidebarKeydown, true);
     window.addEventListener("resize", handleSidebarLayoutChange);
@@ -493,6 +495,9 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function handleSidebarLayoutChange(): void {
+    if (refreshSidebarModeFromHostState()) {
+      hasRestoredSidebarMode = false;
+    }
     scheduleSidebarModeReconcile(5);
   }
 
@@ -850,6 +855,38 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return value === "expanded" || value === "collapsed" ? value : null;
   }
 
+  function getSidebarModeStorage() {
+    return getStorage("localStorage");
+  }
+
+  function getSidebarModePersistedAtomKey(): string {
+    return LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY;
+  }
+
+  function readSidebarModeFromHostState(state: Record<string, unknown>): SidebarMode | null {
+    return readSidebarModeValue(state[LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY]);
+  }
+
+  function readSidebarModeFromBrowserStorage(): SidebarMode | null {
+    const storage = getSidebarModeStorage();
+    if (!storage) {
+      return null;
+    }
+
+    return readSidebarModeValue(storage.getItem(getSidebarModePersistedAtomKey()));
+  }
+
+  function refreshSidebarModeFromHostState(): boolean {
+    const nextMode = readSidebarModeFromBrowserStorage();
+    if (nextMode === sidebarModeFromHost) {
+      return false;
+    }
+
+    sidebarModeFromHost = nextMode;
+    clearPendingSidebarModeTarget();
+    return true;
+  }
+
   function armSidebarModeInteractionIfToggleTrigger(target: Element): void {
     const nearestInteractive = target.closest('button, a, [role="button"]');
     if (!(nearestInteractive instanceof Element)) {
@@ -916,14 +953,8 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   function persistSidebarMode(mode: SidebarMode): void {
     clearSidebarModeInteractionArm();
     sidebarModeFromHost = mode;
-    sendEnvelope({
-      type: "bridge_message",
-      message: {
-        type: "persisted-atom-update",
-        key: SIDEBAR_MODE_PERSISTED_ATOM_KEY,
-        value: mode,
-      },
-    });
+    const storage = getSidebarModeStorage();
+    storage?.setItem(getSidebarModePersistedAtomKey(), mode);
   }
 
   function isPrimaryUnmodifiedClick(event: MouseEvent): boolean {
@@ -1592,24 +1623,19 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     if (message.type === "persisted-atom-sync") {
-      const state = isRecord(message.state) ? message.state : {};
-      sidebarModeFromHost = readSidebarModeValue(state[SIDEBAR_MODE_PERSISTED_ATOM_KEY]);
-      clearPendingSidebarModeTarget();
       hasReceivedSidebarModeSync = true;
-      hasRestoredSidebarMode = false;
-      scheduleSidebarModeReconcile(20);
-      return;
-    }
-
-    if (
-      message.type === "persisted-atom-updated" &&
-      message.key === SIDEBAR_MODE_PERSISTED_ATOM_KEY
-    ) {
-      sidebarModeFromHost = message.deleted === true ? null : readSidebarModeValue(message.value);
-      clearPendingSidebarModeTarget();
-      hasReceivedSidebarModeSync = true;
-      hasRestoredSidebarMode = false;
-      scheduleSidebarModeReconcile(20);
+      if (readSidebarModeFromBrowserStorage() === null) {
+        const state = isRecord(message.state) ? message.state : {};
+        const migratedMode = readSidebarModeFromHostState(state);
+        if (migratedMode) {
+          const storage = getSidebarModeStorage();
+          storage?.setItem(getSidebarModePersistedAtomKey(), migratedMode);
+        }
+        if (refreshSidebarModeFromHostState()) {
+          hasRestoredSidebarMode = false;
+          scheduleSidebarModeReconcile(20);
+        }
+      }
     }
   }
 
