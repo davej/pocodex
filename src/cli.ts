@@ -1,23 +1,12 @@
 #!/usr/bin/env node
 
-import { randomUUID } from "node:crypto";
-import { watch } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { basename, dirname } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { AppServerBridge } from "./lib/app-server-bridge.js";
-import { loadCodexBundle } from "./lib/codex-bundle.js";
-import { renderBootstrapScript } from "./lib/bootstrap-script.js";
-import { patchIndexHtml } from "./lib/html-patcher.js";
-import type { SentryInitOptions, ServeCommandOptions } from "./lib/protocol.js";
-import { getServeUrls } from "./lib/serve-url.js";
-import { PocodexServer } from "./lib/server.js";
+import { DEFAULT_POCODEX_APP_PATH, createPocodexRuntime } from "./index.js";
+import type { ServeCommandOptions } from "./lib/protocol.js";
 
-const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_LISTEN = "127.0.0.1:8787";
-const POCODEX_STYLESHEET_HREF = "/pocodex.css";
 const FLAG_NAMES_WITH_VALUES = new Set(["--app", "--listen", "--token"]);
 const BOOLEAN_FLAG_NAMES = new Set(["--dev"]);
 
@@ -44,51 +33,17 @@ async function main(): Promise<void> {
 
   const options = parseServeCommand(serveArgv);
   const pocodexCssPath = fileURLToPath(new URL("./pocodex.css", import.meta.url));
-  const importIconSvgPath = fileURLToPath(new URL("./images/import.svg", import.meta.url));
-  const bundle = await loadCodexBundle(options.appPath);
-  const relay = await AppServerBridge.connect({
-    appPath: options.appPath,
+  const runtime = createPocodexRuntime({
+    ...options,
     cwd: process.cwd(),
   });
-
-  const sentryOptions: SentryInitOptions = {
-    buildFlavor: bundle.buildFlavor,
-    appVersion: bundle.version,
-    buildNumber: bundle.buildNumber,
-    codexAppSessionId: randomUUID(),
-  };
-
-  const server = new PocodexServer({
-    listenHost: options.listenHost,
-    listenPort: options.listenPort,
-    token: options.token,
-    relay,
-    webviewRoot: bundle.webviewRoot,
-    readPocodexStylesheet: async () => readFile(pocodexCssPath, "utf8"),
-    renderIndexHtml: async () => {
-      const indexHtml = await bundle.readIndexHtml();
-      return patchIndexHtml(indexHtml, {
-        bootstrapScript: renderBootstrapScript({
-          sentryOptions,
-          stylesheetHref: POCODEX_STYLESHEET_HREF,
-          importIconSvg: await readFile(importIconSvgPath, "utf8"),
-        }),
-        stylesheetHref: POCODEX_STYLESHEET_HREF,
-      });
-    },
+  runtime.on("error", (error) => {
+    console.error(error.message);
   });
-
-  const stopWatchingStylesheet = options.devMode
-    ? watchPocodexStylesheet(pocodexCssPath, () => {
-        server.notifyStylesheetReload(String(Date.now()));
-      })
-    : () => {};
 
   const shutdown = async (signal: string) => {
     console.log(`\nShutting down Pocodex after ${signal}...`);
-    stopWatchingStylesheet();
-    await server.close();
-    await relay.close();
+    await runtime.stop();
     process.exit(0);
   };
 
@@ -99,27 +54,25 @@ async function main(): Promise<void> {
     void shutdown("SIGTERM");
   });
 
-  await server.listen();
-  const listeningAddress = server.getAddress();
-  const serveUrls = getServeUrls({
-    listenHost: options.listenHost,
-    listenPort: listeningAddress.port,
-    token: options.token,
-  });
+  const snapshot = await runtime.start();
 
-  console.log(`Pocodex listening on ${serveUrls.localUrl}`);
-  console.log(`Open ${serveUrls.localOpenUrl}`);
-  if (serveUrls.networkUrl && serveUrls.networkOpenUrl) {
-    console.log(`Local network URL ${serveUrls.networkUrl}`);
-    console.log(`Open on your local network ${serveUrls.networkOpenUrl}`);
+  if (!snapshot.localUrl || !snapshot.localOpenUrl) {
+    throw new Error("Pocodex started without a local URL.");
+  }
+
+  console.log(`Pocodex listening on ${snapshot.localUrl}`);
+  console.log(`Open ${snapshot.localOpenUrl}`);
+  if (snapshot.networkUrl && snapshot.networkOpenUrl) {
+    console.log(`Local network URL ${snapshot.networkUrl}`);
+    console.log(`Open on your local network ${snapshot.networkOpenUrl}`);
   } else if (options.listenHost === "0.0.0.0") {
     console.log("Local network URL unavailable; no active LAN IPv4 address was detected.");
   } else if (options.listenHost === "127.0.0.1" || options.listenHost === "localhost") {
     console.log(
-      `Local network URL unavailable while listening on ${serveUrls.localUrl} (use --listen 0.0.0.0:${listeningAddress.port} to expose it on your LAN)`,
+      `Local network URL unavailable while listening on ${snapshot.localUrl} (use --listen 0.0.0.0:${snapshot.listenPort} to expose it on your LAN)`,
     );
   }
-  console.log(`Using Codex ${bundle.version} from ${bundle.appPath}`);
+  console.log(`Using Codex ${snapshot.codexVersion ?? "unknown"} from ${snapshot.appPath}`);
   console.log(`Using direct app-server bridge from ${options.appPath}`);
   if (options.devMode) {
     console.log(`Watching ${pocodexCssPath} for stylesheet changes`);
@@ -129,14 +82,14 @@ async function main(): Promise<void> {
 function parseServeCommand(argv: string[]): ServeCommandOptions {
   validateServeArgs(argv);
 
-  const appPath = readFlag(argv, "--app") ?? DEFAULT_APP_PATH;
+  const appPath = readFlag(argv, "--app") ?? DEFAULT_POCODEX_APP_PATH;
   const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
   const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
 
   const [listenHost, portText] = listen.split(":");
   const listenPort = Number.parseInt(portText ?? "", 10);
-  if (!listenHost || !Number.isInteger(listenPort) || listenPort <= 0) {
+  if (!listenHost || !Number.isInteger(listenPort) || listenPort < 0) {
     throw new Error(`Invalid --listen value: ${listen}`);
   }
 
@@ -194,33 +147,6 @@ function printUsage(): void {
   console.error(
     "  pocodex [--token <secret>] [--app /Applications/Codex.app] [--listen 127.0.0.1:8787] [--dev]",
   );
-}
-
-function watchPocodexStylesheet(cssFilePath: string, onChange: () => void): () => void {
-  const cssDirectory = dirname(cssFilePath);
-  const cssFilename = basename(cssFilePath);
-  let debounceTimer: NodeJS.Timeout | undefined;
-
-  const watcher = watch(cssDirectory, (_eventType, changedFilename) => {
-    const changedName = changedFilename ? String(changedFilename) : undefined;
-    if (changedName && changedName !== cssFilename) {
-      return;
-    }
-    if (debounceTimer) {
-      clearTimeout(debounceTimer);
-    }
-    debounceTimer = setTimeout(() => {
-      debounceTimer = undefined;
-      onChange();
-    }, 50);
-  });
-
-  return () => {
-    if (debounceTimer) {
-      clearTimeout(debounceTimer);
-    }
-    watcher.close();
-  };
 }
 
 await main().catch((error) => {
