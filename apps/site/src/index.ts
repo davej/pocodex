@@ -6,6 +6,7 @@ const page = `<!doctype html>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Pocodex</title>
+    <link rel="icon" href="/favicon.png" type="image/png">
     <meta
       name="description"
       content="Pocodex brings Codex.app to the browser. Download the desktop app or view the project on GitHub."
@@ -236,7 +237,7 @@ export default {
     const { pathname } = new URL(request.url);
 
     if (pathname === "/favicon.ico") {
-      return new Response(null, { status: 204 });
+      return Response.redirect(new URL("/favicon.png", request.url), 302);
     }
 
     return new Response(page, {
