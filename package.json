@@ -60,11 +60,7 @@
     "prepack": "pnpm run build",
     "site:deploy": "pnpm --filter pocodex-site deploy",
     "test": "pnpm run build && vitest run ./test",
-    "todesktop:build": "todesktop build --config apps/tray/todesktop.json",
-    "todesktop:build:fast": "todesktop build --code-sign=false --config apps/tray/todesktop.json",
-    "todesktop:builds": "todesktop builds --config apps/tray/todesktop.json",
-    "todesktop:release": "todesktop release --config apps/tray/todesktop.json",
-    "todesktop:smoke-test": "todesktop smoke-test --config apps/tray/todesktop.json",
+    "todesktop:build": "pnpm --filter pocodex-tray build && todesktop build --config apps/tray/todesktop.json",
     "typecheck": "pnpm exec tsgo --noEmit"
   },
   "dependencies": {
