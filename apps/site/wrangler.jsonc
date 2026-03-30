@@ -3,6 +3,9 @@
   "name": "pocodex-site",
   "main": "src/index.ts",
   "compatibility_date": "2026-03-30",
+  "assets": {
+    "directory": "./public",
+  },
   "routes": [
     {
       "pattern": "www.pocodex.app",

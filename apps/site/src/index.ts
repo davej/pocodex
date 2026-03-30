@@ -42,7 +42,7 @@ const page = `<!doctype html>
       }
 
       .frame {
-        width: min(42rem, 100%);
+        width: min(68rem, 100%);
         border: 2px solid var(--ink);
         border-radius: 2rem;
         background: var(--card);
@@ -52,7 +52,11 @@ const page = `<!doctype html>
       }
 
       .hero {
-        padding: 2.25rem 2.25rem 1.5rem;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(18rem, 20rem);
+        gap: 2rem;
+        align-items: center;
+        padding: 2.25rem;
       }
 
       .logo {
@@ -74,11 +78,35 @@ const page = `<!doctype html>
         line-height: 1.55;
       }
 
+      .hero-copy {
+        min-width: 0;
+      }
+
       .actions {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
         gap: 1rem;
-        padding: 0 2.25rem 2.25rem;
+        margin-top: 1.5rem;
+      }
+
+      .preview {
+        min-width: 0;
+      }
+
+      .preview-frame {
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 1.5rem;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+      }
+
+      .preview img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 1rem;
+        border: 1px solid rgba(14, 13, 11, 0.12);
       }
 
       .card {
@@ -140,9 +168,14 @@ const page = `<!doctype html>
       }
 
       @media (max-width: 640px) {
-        .hero, .actions, .footer {
+        .hero, .footer {
           padding-left: 1.35rem;
           padding-right: 1.35rem;
+        }
+
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 1.35rem;
         }
 
         .footer {
@@ -155,27 +188,39 @@ const page = `<!doctype html>
     <main>
       <section class="frame">
         <div class="hero">
-          <div class="logo">${logoMarkup}</div>
-          <h1>Pocodex</h1>
-          <p>
-            Use Codex.app in a real browser. Like Claude Code Remote Control, but for Codex.
-          </p>
-        </div>
-        <div class="actions">
-          <a class="card" href="https://download.pocodex.app/" rel="noreferrer">
-            <div>
-              <strong>Download Desktop App</strong>
-              <span>Install the latest Pocodex release.</span>
+          <div class="hero-copy">
+            <div class="logo">${logoMarkup}</div>
+            <h1>Pocodex</h1>
+            <p>
+              Use Codex.app in a real browser. Like Claude Code Remote Control, but for Codex.
+            </p>
+            <div class="actions">
+              <a class="card" href="https://download.pocodex.app/" rel="noreferrer">
+                <div>
+                  <strong>Download Desktop App</strong>
+                  <span>Install the latest Pocodex release.</span>
+                </div>
+                <div class="arrow">↗</div>
+              </a>
+              <a class="card" href="https://github.com/davej/pocodex" rel="noreferrer">
+                <div>
+                  <strong>View on GitHub</strong>
+                  <span>Read the code, issues, and release notes.</span>
+                </div>
+                <div class="arrow">↗</div>
+              </a>
             </div>
-            <div class="arrow">↗</div>
-          </a>
-          <a class="card" href="https://github.com/davej/pocodex" rel="noreferrer">
-            <div>
-              <strong>View on GitHub</strong>
-              <span>Read the code, issues, and release notes.</span>
+          </div>
+          <div class="preview">
+            <div class="preview-frame">
+              <img
+                src="/screenshot.png"
+                alt="Pocodex showing the Codex.app interface in the browser"
+                width="620"
+                height="914"
+              >
             </div>
-            <div class="arrow">↗</div>
-          </a>
+          </div>
         </div>
         <div class="footer">
           <span>Remote Codex access, packaged simply.</span>
