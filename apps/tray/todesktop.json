@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/@todesktop/cli@latest/schemas/schema.json",
+  "schemaVersion": 1,
+  "id": "2603278e8yu9y",
+  "appPath": ".",
+  "bundleWorkspacePackages": {
+    "enabled": true
+  },
+  "icon": "./assets/app-icon.png",
+  "nodeVersion": "24.0.0",
+  "packageManager": "pnpm",
+  "pnpmVersion": "9.9.0",
+  "mac": {
+    "category": "public.app-category.productivity"
+  }
+}
