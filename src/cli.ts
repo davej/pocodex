@@ -16,6 +16,11 @@ import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from 
 import type { SentryInitOptions, ServeCommandOptions } from "./lib/protocol.js";
 import { getServeUrls } from "./lib/serve-url.js";
 import { PocodexServer } from "./lib/server.js";
+import {
+  deriveLastUsedCodexBuildPath,
+  formatCodexBuildSignature,
+  recordUsedCodexBuild,
+} from "./lib/used-codex-build.js";
 
 const DEFAULT_LISTEN = "127.0.0.1:8787";
 const POCODEX_BACKGROUND_COLOR = "#111827";
@@ -53,6 +58,11 @@ async function main(): Promise<void> {
   const pocodexCssPath = fileURLToPath(new URL("./pocodex.css", import.meta.url));
   const importIconSvgPath = fileURLToPath(new URL("./images/import.svg", import.meta.url));
   const bundle = await loadCodexBundle(options.appPath);
+  const usedCodexBuild = await recordUsedCodexBuild(deriveLastUsedCodexBuildPath(), {
+    version: bundle.version,
+    buildFlavor: bundle.buildFlavor,
+    buildNumber: bundle.buildNumber,
+  }).catch(() => null);
   const relay = await AppServerBridge.connect({
     appPath: options.appPath,
     cwd: process.cwd(),
@@ -146,6 +156,11 @@ async function main(): Promise<void> {
     );
   }
   console.log(`Using Codex ${bundle.version} from ${bundle.appPath}`);
+  if (usedCodexBuild?.isUpdated && usedCodexBuild.previousBuild) {
+    console.log(
+      `Updated Codex detected: now using ${formatCodexBuildSignature(usedCodexBuild.currentBuild)}, previously ${formatCodexBuildSignature(usedCodexBuild.previousBuild)}`,
+    );
+  }
   console.log(`Using direct app-server bridge from ${bundle.appPath}`);
   if (options.devMode) {
     console.log(`Watching ${pocodexCssPath} for stylesheet changes`);
