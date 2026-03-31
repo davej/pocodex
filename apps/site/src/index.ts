@@ -203,6 +203,13 @@ const page = `<!doctype html>
                 </div>
                 <div class="arrow">↗</div>
               </a>
+              <div class="card">
+                <div>
+                  <strong>Install the CLI</strong>
+                  <span><code>npm i -g pocodex</code></span>
+                </div>
+                <div class="arrow">⌘</div>
+              </div>
               <a class="card" href="https://github.com/davej/pocodex" rel="noreferrer">
                 <div>
                   <strong>View on GitHub</strong>
