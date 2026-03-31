@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/davej/pocodex/compare/pocodex-v0.3.0...pocodex-v0.4.0) (2026-03-31)
+
+
+### Features
+
+* **browser:** add workspace root picker and import flow ([0303724](https://github.com/davej/pocodex/commit/03037241e8702c62e9165c69f3306f4bafecb697))
+* **distribution:** add tray app and landing site ([1d1c381](https://github.com/davej/pocodex/commit/1d1c381645c11abd7937adabb021f2da57967496))
+* **runtime:** extract reusable pocodex runtime ([3db298d](https://github.com/davej/pocodex/commit/3db298d9d7c210daded06b1e015005ca2d6a2bf6))
+* **site:** add favicon ([44094b3](https://github.com/davej/pocodex/commit/44094b3f6b65ee6188f8208be661bc7325724358))
+* **site:** advertise CLI install ([56c4028](https://github.com/davej/pocodex/commit/56c4028f44e592b87e3b635016a7433e0c3fd698))
+
 ## [0.3.0](https://github.com/davej/pocodex/compare/pocodex-v0.2.1...pocodex-v0.3.0) (2026-03-12)
 
 ### Features
