@@ -1246,11 +1246,14 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           body,
         );
         if (handled) {
-          if (message.url === "vscode://codex/ide-context") {
+          if (handled.status < 200 || handled.status >= 300) {
             this.emitFetchError(
               message.requestId,
               handled.status,
-              "IDE context is unavailable in Pocodex.",
+              readFetchErrorMessage(
+                handled.body,
+                `Codex host fetch failed for ${new URL(message.url).pathname}.`,
+              ),
             );
             return;
           }
@@ -1603,6 +1606,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           status: 200,
           body: await this.writeCodexAgentsMarkdown(body),
         };
+      case "read-file":
+        return await this.readCodexFile(body);
       case "list-automations":
         return {
           status: 200,
@@ -2158,6 +2163,70 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     return {
       path,
     };
+  }
+
+  private async readCodexFile(body: unknown): Promise<RelativeFetchResponse> {
+    const path = readCodexFilePath(body);
+    if (!path) {
+      return {
+        status: 400,
+        body: {
+          error: "File path is required.",
+        },
+      };
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = normalizeCodexReadFilePath(path);
+    } catch (error) {
+      return {
+        status: 400,
+        body: {
+          error: normalizeError(error).message,
+        },
+      };
+    }
+
+    try {
+      const stats = await stat(resolvedPath);
+      if (!stats.isFile()) {
+        return {
+          status: 400,
+          body: {
+            error: "File path must point to a file.",
+          },
+        };
+      }
+
+      return {
+        status: 200,
+        body: {
+          path: resolvedPath,
+          contents: await readFile(resolvedPath, "utf8"),
+        },
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return {
+          status: 404,
+          body: {
+            error: "File not found.",
+          },
+        };
+      }
+
+      if (isPermissionDeniedError(error)) {
+        return {
+          status: 403,
+          body: {
+            error: "File is not readable.",
+          },
+        };
+      }
+
+      throw error;
+    }
   }
 
   private readDeveloperInstructions(body: unknown): string | null {
@@ -3603,6 +3672,11 @@ function readCodexAgentsMarkdownContents(body: unknown): string | null {
   return params.contents;
 }
 
+function readCodexFilePath(body: unknown): string | null {
+  const params = readCodexFetchParams(body);
+  return isJsonRecord(params) && typeof params.path === "string" ? params.path : null;
+}
+
 function readLocalEnvironmentWorkspaceRoot(body: unknown): string | null {
   const params = readCodexFetchParams(body);
   return isJsonRecord(params) && typeof params.workspaceRoot === "string"
@@ -3630,6 +3704,42 @@ function readCodexFetchParams(body: unknown): unknown {
 
 function isFileNotFoundError(error: unknown): boolean {
   return isJsonRecord(error) && error.code === "ENOENT";
+}
+
+function isPermissionDeniedError(error: unknown): boolean {
+  return isJsonRecord(error) && error.code === "EACCES";
+}
+
+function normalizeCodexReadFilePath(path: string): string {
+  const trimmedPath = path.trim();
+  if (trimmedPath.length === 0) {
+    throw new Error("File path is required.");
+  }
+
+  const expandedPath = expandWorkspaceRootPickerHome(trimmedPath);
+  if (!isAbsolute(expandedPath)) {
+    throw new Error("File path must be absolute.");
+  }
+
+  return resolve(expandedPath);
+}
+
+function readFetchErrorMessage(body: unknown, fallback: string): string {
+  if (typeof body === "string" && body.trim().length > 0) {
+    return body;
+  }
+
+  if (isJsonRecord(body)) {
+    if (typeof body.error === "string" && body.error.trim().length > 0) {
+      return body.error;
+    }
+
+    if (typeof body.message === "string" && body.message.trim().length > 0) {
+      return body.message;
+    }
+  }
+
+  return fallback;
 }
 
 function uniqueStrings(values: unknown[]): string[] {

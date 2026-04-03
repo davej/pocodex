@@ -1877,6 +1877,74 @@ description: Review lint issues quickly.
     await bridge.close();
   });
 
+  it("reads skill contents through the webview read-file contract", async () => {
+    const skillDirectory = await mkdtemp(join(tmpdir(), "pocodex-skill-"));
+    tempDirs.push(skillDirectory);
+    const skillPath = join(skillDirectory, "SKILL.md");
+    await writeFile(skillPath, "# Demo Skill\n\nUse concise output.\n", "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-read-file",
+      method: "POST",
+      url: "vscode://codex/read-file",
+      body: JSON.stringify({
+        params: {
+          path: skillPath,
+        },
+      }),
+    });
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-read-file")));
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-read-file")).toEqual({
+      path: skillPath,
+      contents: "# Demo Skill\n\nUse concise output.\n",
+    });
+
+    await bridge.close();
+  });
+
+  it("returns a fetch error for invalid read-file paths", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-read-file-invalid",
+      method: "POST",
+      url: "vscode://codex/read-file",
+      body: JSON.stringify({
+        params: {
+          path: "skills/demo/SKILL.md",
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-read-file-invalid")),
+    );
+
+    expect(getFetchResponse(emittedMessages, "fetch-read-file-invalid")).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-read-file-invalid",
+      responseType: "error",
+      status: 400,
+      error: "File path must be absolute.",
+    });
+
+    await bridge.close();
+  });
+
   it("lists local environments for a workspace root using the webview contract", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-local-environments-"));
     tempDirs.push(tempDirectory);
