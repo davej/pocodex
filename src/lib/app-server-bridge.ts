@@ -530,6 +530,107 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
+  private async sendGitWorkerRequest(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const requestId = randomUUID();
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        this.off("worker_message", onWorkerMessage);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const settle = (callback: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        callback();
+      };
+      const onWorkerMessage = (workerName: string, message: unknown) => {
+        if (workerName !== "git" || !isJsonRecord(message) || message.type !== "worker-response") {
+          return;
+        }
+
+        const response = isJsonRecord(message.response) ? message.response : null;
+        if (
+          !response ||
+          (typeof response.id !== "string" && typeof response.id !== "number") ||
+          String(response.id) !== requestId ||
+          response.method !== method
+        ) {
+          return;
+        }
+
+        const result = isJsonRecord(response.result) ? response.result : null;
+        if (!result || result.type !== "ok") {
+          const workerError = result && isJsonRecord(result.error) ? result.error : null;
+          settle(() => {
+            reject(
+              new Error(
+                typeof workerError?.message === "string" && workerError.message.trim().length > 0
+                  ? workerError.message
+                  : `Git worker request "${method}" failed.`,
+              ),
+            );
+          });
+          return;
+        }
+
+        settle(() => {
+          resolve(result.value);
+        });
+      };
+
+      const onAbort = () => {
+        const error = new Error(`Git worker request "${method}" was aborted.`);
+        error.name = "AbortError";
+        void this.gitWorkerBridge
+          .send({
+            type: "worker-request-cancel",
+            workerId: "git",
+            id: requestId,
+          })
+          .catch(() => {});
+        settle(() => {
+          reject(error);
+        });
+      };
+
+      if (signal?.aborted) {
+        const error = new Error(`Git worker request "${method}" was aborted.`);
+        error.name = "AbortError";
+        settle(() => {
+          reject(error);
+        });
+        return;
+      }
+
+      this.on("worker_message", onWorkerMessage);
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      this.gitWorkerBridge
+        .send({
+          type: "worker-request",
+          workerId: "git",
+          request: {
+            id: requestId,
+            method,
+            params,
+          },
+        })
+        .catch((error) => {
+          settle(() => {
+            reject(error);
+          });
+        });
+    });
+  }
+
   async subscribeWorker(workerName: string): Promise<void> {
     if (workerName === "git") {
       await this.gitWorkerBridge.subscribe();
@@ -1234,6 +1335,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       if (message.url === "vscode://codex/ipc-request") {
         const payload = parseJsonBody(message.body);
         const result = await this.handleIpcRequest(payload);
+        if (controller.signal.aborted) {
+          return;
+        }
         this.emitFetchSuccess(message.requestId, result);
         return;
       }
@@ -1244,7 +1348,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           message.url,
           typeof message.method === "string" ? message.method : "GET",
           body,
+          controller.signal,
         );
+        if (controller.signal.aborted) {
+          return;
+        }
         if (handled) {
           if (handled.status < 200 || handled.status >= 300) {
             this.emitFetchError(
@@ -1276,6 +1384,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           body: message.body,
           signal: controller.signal,
         });
+        if (controller.signal.aborted) {
+          return;
+        }
         if (handled) {
           this.emitFetchSuccess(message.requestId, handled.body, handled.status, handled.headers);
           return;
@@ -1288,6 +1399,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           signal: controller.signal,
         });
         const handledResponse = await readRemoteFetchResponse(response);
+        if (controller.signal.aborted) {
+          return;
+        }
 
         this.emit("bridge_message", {
           type: "fetch-response",
@@ -1307,6 +1421,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         signal: controller.signal,
       });
       const handledResponse = await readRemoteFetchResponse(response);
+      if (controller.signal.aborted) {
+        return;
+      }
 
       this.emit("bridge_message", {
         type: "fetch-response",
@@ -1317,6 +1434,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         bodyJsonString: JSON.stringify(handledResponse.body),
       });
     } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
       const normalized = normalizeError(error);
       this.emitFetchError(message.requestId, 500, normalized.message);
     } finally {
@@ -1469,10 +1589,25 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     rawUrl: string,
     method: string,
     body: unknown,
+    signal: AbortSignal,
   ): Promise<{ status: number; body: unknown } | null> {
     const url = new URL(rawUrl);
     const path = url.pathname.replace(/^\/+/, "");
     switch (path) {
+      case "apply-patch":
+        try {
+          return {
+            status: 200,
+            body: await this.sendGitWorkerRequest("apply-patch", body, signal),
+          };
+        } catch (error) {
+          return {
+            status: 500,
+            body: {
+              error: normalizeError(error).message,
+            },
+          };
+        }
       case "get-global-state":
         return {
           status: 200,

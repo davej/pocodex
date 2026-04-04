@@ -3038,6 +3038,157 @@ description: Review lint issues quickly.
     expect(gitWorkerBridge.closeCalls).toBe(1);
   });
 
+  it("routes codex apply-patch fetches through the desktop worker bridge", async () => {
+    const gitWorkerBridge = new FakeGitWorkerBridge();
+    const bridge = await createBridge(children, {
+      gitWorkerBridge,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    const body = {
+      cwd: TEST_WORKSPACE_ROOT,
+      diff: "diff --git a/README.md b/README.md\n",
+      revert: true,
+      target: "unstaged",
+    };
+
+    const forwardPromise = bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-apply-patch",
+      method: "POST",
+      url: "vscode://codex/apply-patch",
+      body: JSON.stringify(body),
+    });
+
+    await waitForCondition(() => gitWorkerBridge.sentMessages.length === 1);
+
+    expect(gitWorkerBridge.sentMessages).toHaveLength(1);
+    expect(gitWorkerBridge.sentMessages[0]).toMatchObject({
+      type: "worker-request",
+      workerId: "git",
+      request: {
+        method: "apply-patch",
+        params: body,
+      },
+    });
+
+    const workerRequest = gitWorkerBridge.sentMessages[0] as {
+      request: {
+        id: string;
+      };
+    };
+
+    gitWorkerBridge.emit("message", {
+      type: "worker-response",
+      workerId: "git",
+      response: {
+        id: workerRequest.request.id,
+        method: "apply-patch",
+        result: {
+          type: "ok",
+          value: {
+            status: "success",
+            appliedPaths: ["README.md"],
+            skippedPaths: [],
+            conflictedPaths: [],
+          },
+        },
+      },
+    });
+
+    await forwardPromise;
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-apply-patch")));
+
+    expect(getFetchResponse(emittedMessages, "fetch-apply-patch")).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-apply-patch",
+      responseType: "success",
+      status: 200,
+    });
+    expect(getFetchJsonBody(emittedMessages, "fetch-apply-patch")).toEqual({
+      status: "success",
+      appliedPaths: ["README.md"],
+      skippedPaths: [],
+      conflictedPaths: [],
+    });
+
+    await bridge.close();
+  });
+
+  it("cancels codex apply-patch fetches through the desktop worker bridge", async () => {
+    const gitWorkerBridge = new FakeGitWorkerBridge();
+    const bridge = await createBridge(children, {
+      gitWorkerBridge,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    const body = {
+      cwd: TEST_WORKSPACE_ROOT,
+      diff: "diff --git a/README.md b/README.md\n",
+      revert: true,
+      target: "unstaged",
+    };
+
+    const forwardPromise = bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-apply-patch-cancel",
+      method: "POST",
+      url: "vscode://codex/apply-patch",
+      body: JSON.stringify(body),
+    });
+
+    await waitForCondition(() => gitWorkerBridge.sentMessages.length === 1);
+
+    const workerRequest = gitWorkerBridge.sentMessages[0] as {
+      request: {
+        id: string;
+      };
+    };
+
+    await bridge.forwardBridgeMessage({
+      type: "cancel-fetch",
+      requestId: "fetch-apply-patch-cancel",
+    });
+
+    await forwardPromise;
+    await waitForCondition(() => gitWorkerBridge.sentMessages.length === 2);
+
+    expect(gitWorkerBridge.sentMessages[1]).toEqual({
+      type: "worker-request-cancel",
+      workerId: "git",
+      id: workerRequest.request.id,
+    });
+
+    gitWorkerBridge.emit("message", {
+      type: "worker-response",
+      workerId: "git",
+      response: {
+        id: workerRequest.request.id,
+        method: "apply-patch",
+        result: {
+          type: "ok",
+          value: {
+            status: "success",
+            appliedPaths: ["README.md"],
+            skippedPaths: [],
+            conflictedPaths: [],
+          },
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getFetchResponse(emittedMessages, "fetch-apply-patch-cancel")).toBeUndefined();
+
+    await bridge.close();
+  });
+
   it("delegates git worker subscriptions to the desktop worker bridge", async () => {
     const gitWorkerBridge = new FakeGitWorkerBridge();
     const bridge = await createBridge(children, {
