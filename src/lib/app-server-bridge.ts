@@ -266,6 +266,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private nextRequestId = 0;
   private isClosing = false;
   private isInitialized = false;
+  private childExited = false;
   private connectionState: "connecting" | "connected" | "disconnected" = "connecting";
 
   override on(event: "bridge_message", listener: (message: unknown) => void): this;
@@ -342,14 +343,30 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       });
     });
 
-    if (!this.child.killed) {
-      this.child.kill();
-    }
+    if (!this.childExited) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        let timer: NodeJS.Timeout | undefined;
+        const settle = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (timer) {
+            clearTimeout(timer);
+          }
+          this.child.off("exit", settle);
+          resolve();
+        };
 
-    await new Promise<void>((resolve) => {
-      this.child.once("exit", () => resolve());
-      setTimeout(() => resolve(), 1_000);
-    });
+        this.child.once("exit", settle);
+        timer = setTimeout(settle, 1_000);
+
+        if (!this.child.killed) {
+          this.child.kill();
+        }
+      });
+    }
 
     await this.persistedAtomWritePromise.catch(() => undefined);
   }
@@ -708,6 +725,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
 
     this.child.once("exit", (code, signal) => {
+      this.childExited = true;
       this.connectionState = "disconnected";
       this.rejectPendingRequests(
         new Error(
