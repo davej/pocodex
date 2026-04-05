@@ -1,0 +1,32 @@
+{
+  "name": "pocodex-tray",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pocodex tray app",
+  "homepage": "https://download.pocodex.app/",
+  "author": {
+    "name": "Dave Jeffery",
+    "email": "dave@davejeffery.com",
+    "url": "https://www.pocodex.app"
+  },
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "pnpm run build:assets && pnpm run build:deps && rm -rf dist && pnpm exec tsgo -p tsconfig.json",
+    "build:assets": "node ./scripts/build-tray-assets.mjs",
+    "build:deps": "node ./scripts/build-pocodex-workspace.mjs",
+    "dev": "pnpm run build && electron ./dist/main.js",
+    "start": "pnpm run dev"
+  },
+  "dependencies": {
+    "@todesktop/runtime": "^2.1.4",
+    "pocodex": "workspace:*"
+  },
+  "devDependencies": {
+    "@todesktop/cli": "^1.23.2",
+    "@types/node": "^25.3.5",
+    "@typescript/native-preview": "^7.0.0-dev.20260312.1",
+    "electron": "37.10.3"
+  },
+  "productName": "Pocodex"
+}

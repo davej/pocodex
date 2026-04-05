@@ -247,6 +247,13 @@ export class PocodexServer {
       );
       response.end(fileBuffer);
     } catch {
+      if (shouldServeSpaShell(request.method, url.pathname)) {
+        response.statusCode = 200;
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("Content-Type", "text/html; charset=utf-8");
+        response.end(await this.getIndexHtml());
+        return;
+      }
       response.statusCode = 404;
       response.end("Not found");
     }
@@ -795,15 +802,23 @@ export class PocodexServer {
   }
 
   private refreshTerminalOwner(route: TerminalSessionRoute): void {
-    if (route.ownerBrowserSessionId && this.sessions.has(route.ownerBrowserSessionId)) {
+    if (route.ownerBrowserSessionId && this.isSessionActive(route.ownerBrowserSessionId)) {
       return;
     }
 
     route.participantOrder = route.participantOrder.filter((sessionId) => {
       const session = this.sessions.get(sessionId);
-      return session ? route.localSessionIdsByBrowserSessionId.has(session.id) : false;
+      return session
+        ? route.localSessionIdsByBrowserSessionId.has(session.id) &&
+            session.socket.readyState === WebSocket.OPEN
+        : false;
     });
     route.ownerBrowserSessionId = route.participantOrder[0] ?? null;
+  }
+
+  private isSessionActive(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return session?.socket.readyState === WebSocket.OPEN;
   }
 
   private broadcast(envelope: ServerToBrowserEnvelope): void {
@@ -925,4 +940,13 @@ function stripInternalBridgeFields(message: JsonRecord): JsonRecord {
     ...rest
   } = message;
   return rest;
+}
+
+function shouldServeSpaShell(method: string | undefined, pathname: string): boolean {
+  if (method && method !== "GET" && method !== "HEAD") {
+    return false;
+  }
+
+  const lastPathSegment = pathname.split("/").at(-1) ?? "";
+  return !lastPathSegment.includes(".");
 }

@@ -1316,6 +1316,251 @@ describe("renderBootstrapScript", () => {
     expect(event.immediatePropagationStopped).toBe(false);
   });
 
+  it("restores the last in-app route and persists history changes", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    class EventTargetLike {
+      addEventListener(_type: string, _listener: (...args: unknown[]) => void): void {}
+
+      dispatchEvent(_event: unknown): boolean {
+        return true;
+      }
+    }
+
+    class Element extends EventTargetLike {
+      dataset: Record<string, string> = {};
+      parentElement: Element | null = null;
+      hidden = false;
+      id = "";
+      rel = "";
+      href = "";
+      textContent = "";
+
+      appendChild<T extends Element>(child: T): T {
+        child.parentElement = this;
+        return child;
+      }
+
+      append(..._nodes: Element[]): void {}
+
+      contains(_node: Element): boolean {
+        return false;
+      }
+
+      replaceChildren(..._nodes: Element[]): void {}
+
+      remove(): void {}
+
+      after(_node: Element): void {}
+
+      querySelector(_selector: string): Element | null {
+        return null;
+      }
+
+      querySelectorAll(_selector: string): {
+        length: number;
+        item(index: number): Element | null;
+        forEach(callback: (value: Element, key: number, parent: unknown) => void): void;
+      } {
+        return {
+          length: 0,
+          item: () => null,
+          forEach: () => {},
+        };
+      }
+
+      getAttribute(_name: string): string | null {
+        return null;
+      }
+    }
+
+    class HTMLDivElement extends Element {}
+    class HTMLLinkElement extends Element {}
+
+    class Document extends EventTargetLike {
+      readyState = "complete";
+      visibilityState = "visible";
+      documentElement = new Element();
+      head = new Element();
+      body = new Element();
+
+      createElement(tagName: string): Element {
+        if (tagName === "div") {
+          return new HTMLDivElement();
+        }
+        if (tagName === "link") {
+          return new HTMLLinkElement();
+        }
+        return new Element();
+      }
+
+      getElementsByTagName(tagName: string): Element[] {
+        return tagName === "head" ? [this.head] : [];
+      }
+
+      querySelector(selector: string): Element | null {
+        return this.documentElement.querySelector(selector);
+      }
+
+      querySelectorAll(selector: string) {
+        return this.documentElement.querySelectorAll(selector);
+      }
+
+      getElementById(_id: string): Element | null {
+        return null;
+      }
+
+      hasFocus(): boolean {
+        return true;
+      }
+    }
+
+    class MutationObserver {
+      constructor(_callback: (...args: unknown[]) => void) {}
+
+      observe(_target: Element, _options: unknown): void {}
+    }
+
+    class Request {
+      method = "GET";
+
+      constructor(readonly url: string) {}
+    }
+
+    class Response {
+      constructor(
+        readonly body: string,
+        readonly init: {
+          status: number;
+          headers: Record<string, string>;
+        },
+      ) {}
+    }
+
+    class MessageEvent {
+      constructor(
+        readonly type: string,
+        readonly init: { data: unknown },
+      ) {}
+    }
+
+    class WebSocket {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+
+      readyState = WebSocket.CONNECTING;
+
+      constructor(readonly url: string) {}
+
+      addEventListener(_type: string, _listener: (...args: unknown[]) => void): void {}
+
+      send(_message: string): void {}
+
+      close(_code?: number, _reason?: string): void {
+        this.readyState = WebSocket.CLOSED;
+      }
+    }
+
+    const storage = new Map<string, string>([
+      ["__pocodex_token", "secret"],
+      ["__pocodex_last_route", "/local/thread-1"],
+    ]);
+    const document = new Document();
+    const windowObject = new EventTargetLike() as EventTargetLike & {
+      location: {
+        href: string;
+        protocol: string;
+        host: string;
+        reload: () => void;
+      };
+      history: {
+        pushState: (data: unknown, unused: string, url?: string | URL | null) => void;
+        replaceState: (data: unknown, unused: string, url?: string | URL | null) => void;
+      };
+      fetch: (input: unknown, init?: unknown) => Promise<unknown>;
+      setTimeout: (callback: () => void, delay: number) => number;
+      clearTimeout: (id: number) => void;
+    };
+
+    const updateLocation = (url?: string | URL | null) => {
+      if (!url) {
+        return;
+      }
+      const next = new URL(String(url), windowObject.location.href);
+      windowObject.location.href = next.toString();
+      windowObject.location.protocol = next.protocol;
+      windowObject.location.host = next.host;
+    };
+
+    windowObject.location = {
+      href: "http://127.0.0.1:8787/",
+      protocol: "http:",
+      host: "127.0.0.1:8787",
+      reload: () => {},
+    };
+    windowObject.history = {
+      pushState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+        updateLocation(url);
+      },
+      replaceState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+        updateLocation(url);
+      },
+    };
+    windowObject.fetch = async () => ({ ok: true, status: 200 });
+    windowObject.setTimeout = (_callback: () => void, _delay: number) => 0;
+    windowObject.clearTimeout = (_id: number) => {};
+
+    const context = vm.createContext({
+      window: windowObject,
+      document,
+      URL,
+      HTMLDivElement,
+      HTMLLinkElement,
+      MutationObserver,
+      MessageEvent,
+      Request,
+      Response,
+      WebSocket,
+      sessionStorage: {
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        getItem: (key: string) => storage.get(key) ?? null,
+      },
+      Element,
+      Object,
+      Array,
+      Map,
+      Set,
+      Math,
+      JSON,
+      Promise,
+      String,
+      Number,
+      Boolean,
+      encodeURIComponent,
+    });
+
+    vm.runInContext(script, context);
+
+    expect(windowObject.location.href).toBe("http://127.0.0.1:8787/?thread=thread-1");
+
+    windowObject.history.pushState(null, "", "/local/thread-2?view=diff&token=secret#panel");
+
+    expect(storage.get("__pocodex_last_route")).toBe("/local/thread-2?view=diff#panel");
+  });
+
   it("closes the mobile sidebar after clicking thread and new-thread navigation in the sidebar", () => {
     const script = renderBootstrapScript({
       sentryOptions: {
@@ -1921,7 +2166,18 @@ describe("renderBootstrapScript", () => {
     }
   });
 
-  it("forces multiline enter behavior for mobile sessions without changing the host state", async () => {
+  type EnterBehaviorHarnessOptions = {
+    activeElement?: {
+      tagName: string;
+      type?: string;
+      contentEditable?: boolean;
+    } | null;
+    innerHeight?: number;
+    touchCapable?: boolean;
+    visualViewportHeight?: number | null;
+  };
+
+  async function createEnterBehaviorHarness(options: EnterBehaviorHarnessOptions = {}) {
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -1953,6 +2209,8 @@ describe("renderBootstrapScript", () => {
     }
 
     class Element extends EventTargetLike {
+      readonly tagName: string;
+      private readonly attributes = new Map<string, string>();
       dataset: Record<string, string> = {};
       parentElement: Element | null = null;
       hidden = false;
@@ -1960,6 +2218,11 @@ describe("renderBootstrapScript", () => {
       rel = "";
       href = "";
       textContent = "";
+
+      constructor(tagName = "DIV") {
+        super();
+        this.tagName = tagName.toUpperCase();
+      }
 
       appendChild<T extends Element>(child: T): T {
         child.parentElement = this;
@@ -1994,20 +2257,34 @@ describe("renderBootstrapScript", () => {
         };
       }
 
-      getAttribute(_name: string): string | null {
-        return null;
+      setAttribute(name: string, value: string): void {
+        this.attributes.set(name, value);
+      }
+
+      getAttribute(name: string): string | null {
+        return this.attributes.get(name) ?? null;
       }
     }
 
-    class HTMLDivElement extends Element {}
-    class HTMLLinkElement extends Element {}
+    class HTMLDivElement extends Element {
+      constructor() {
+        super("DIV");
+      }
+    }
+
+    class HTMLLinkElement extends Element {
+      constructor() {
+        super("LINK");
+      }
+    }
 
     class Document extends EventTargetLike {
       readyState = "complete";
       visibilityState = "visible";
-      documentElement = new Element();
-      head = new Element();
-      body = new Element();
+      activeElement: Element | null = null;
+      documentElement = new Element("HTML");
+      head = new Element("HEAD");
+      body = new Element("BODY");
 
       createElement(tagName: string): Element {
         if (tagName === "div") {
@@ -2016,7 +2293,7 @@ describe("renderBootstrapScript", () => {
         if (tagName === "link") {
           return new HTMLLinkElement();
         }
-        return new Element();
+        return new Element(tagName);
       }
 
       getElementsByTagName(tagName: string): Element[] {
@@ -2041,6 +2318,12 @@ describe("renderBootstrapScript", () => {
 
       hasFocus(): boolean {
         return true;
+      }
+    }
+
+    class VisualViewport extends EventTargetLike {
+      constructor(public height: number) {
+        super();
       }
     }
 
@@ -2110,7 +2393,13 @@ describe("renderBootstrapScript", () => {
     const dispatchedMessages: unknown[] = [];
     const storage = new Map<string, string>();
     const document = new Document();
+    const innerHeight = options.innerHeight ?? 900;
+    const visualViewport =
+      options.visualViewportHeight === null
+        ? null
+        : new VisualViewport(options.visualViewportHeight ?? innerHeight);
     const windowObject = new EventTargetLike() as EventTargetLike & {
+      innerHeight: number;
       location: {
         href: string;
         protocol: string;
@@ -2125,8 +2414,29 @@ describe("renderBootstrapScript", () => {
       setTimeout: (callback: () => void, delay: number) => number;
       clearTimeout: (id: number) => void;
       matchMedia: (query: string) => { matches: boolean; media: string };
+      visualViewport?: VisualViewport;
     };
 
+    function createActiveElement(
+      definition: EnterBehaviorHarnessOptions["activeElement"],
+    ): Element | null {
+      if (!definition) {
+        return null;
+      }
+
+      const element = new Element(definition.tagName);
+      if (definition.type) {
+        element.setAttribute("type", definition.type);
+      }
+      if (definition.contentEditable) {
+        element.setAttribute("contenteditable", "true");
+      }
+      return element;
+    }
+
+    document.activeElement = createActiveElement(options.activeElement ?? null);
+
+    windowObject.innerHeight = innerHeight;
     windowObject.location = {
       href: "http://127.0.0.1:8787/local/thread-1?token=secret",
       protocol: "http:",
@@ -2141,9 +2451,12 @@ describe("renderBootstrapScript", () => {
     windowObject.setTimeout = (_callback: () => void) => 0;
     windowObject.clearTimeout = (_id: number) => {};
     windowObject.matchMedia = (query: string) => ({
-      matches: query.includes("max-width"),
+      matches: Boolean(options.touchCapable) && query.includes("pointer: coarse"),
       media: query,
     });
+    if (visualViewport) {
+      windowObject.visualViewport = visualViewport;
+    }
 
     const originalWindowDispatchEvent = windowObject.dispatchEvent.bind(windowObject);
     windowObject.dispatchEvent = (event: MessageEvent) => {
@@ -2164,6 +2477,9 @@ describe("renderBootstrapScript", () => {
       Request,
       Response,
       WebSocket,
+      navigator: {
+        maxTouchPoints: options.touchCapable ? 5 : 0,
+      },
       sessionStorage: {
         setItem: (key: string, value: string) => {
           storage.set(key, value);
@@ -2191,43 +2507,131 @@ describe("renderBootstrapScript", () => {
     const socket = WebSocket.latest;
     expect(socket).not.toBeNull();
 
-    socket?.emit("message", {
-      data: JSON.stringify({
-        type: "bridge_message",
-        message: {
-          type: "persisted-atom-sync",
-          state: {
-            "enter-behavior": "enter",
-            "agent-mode": "auto",
-          },
-        },
-      }),
+    return {
+      dispatchedMessages,
+      emitBridgeMessage(message: unknown) {
+        socket?.emit("message", {
+          data: JSON.stringify({
+            type: "bridge_message",
+            message,
+          }),
+        });
+      },
+      setActiveElement(definition: EnterBehaviorHarnessOptions["activeElement"]) {
+        document.activeElement = createActiveElement(definition);
+        document.dispatchEvent({
+          type: definition ? "focusin" : "focusout",
+        });
+      },
+      setVisualViewportHeight(nextHeight: number) {
+        if (!visualViewport) {
+          throw new Error("visualViewport is not available in this harness");
+        }
+        visualViewport.height = nextHeight;
+        visualViewport.dispatchEvent({ type: "resize" });
+      },
+    };
+  }
+
+  it("forces newline enter behavior while a soft keyboard is visible and restores the host value when it closes", async () => {
+    const harness = await createEnterBehaviorHarness({
+      touchCapable: true,
+      activeElement: {
+        tagName: "textarea",
+      },
+      innerHeight: 900,
+      visualViewportHeight: 540,
     });
 
-    socket?.emit("message", {
-      data: JSON.stringify({
-        type: "bridge_message",
-        message: {
-          type: "persisted-atom-updated",
-          key: "enter-behavior",
-          value: "enter",
-        },
-      }),
+    harness.emitBridgeMessage({
+      type: "persisted-atom-sync",
+      state: {
+        "enter-behavior": "enter",
+        "agent-mode": "auto",
+      },
     });
 
-    expect(dispatchedMessages).toContainEqual({
+    expect(harness.dispatchedMessages).toContainEqual({
       type: "persisted-atom-sync",
       state: {
         "enter-behavior": "newline",
         "agent-mode": "auto",
       },
     });
-    expect(dispatchedMessages).toContainEqual({
+
+    harness.setVisualViewportHeight(900);
+
+    expect(harness.dispatchedMessages.at(-1)).toEqual({
+      type: "persisted-atom-updated",
+      key: "enter-behavior",
+      value: "enter",
+      deleted: false,
+    });
+
+    harness.setVisualViewportHeight(540);
+
+    expect(harness.dispatchedMessages.at(-1)).toEqual({
       type: "persisted-atom-updated",
       key: "enter-behavior",
       value: "newline",
       deleted: false,
     });
+  });
+
+  it("falls back to touch input focus when visualViewport is unavailable", async () => {
+    const harness = await createEnterBehaviorHarness({
+      touchCapable: true,
+      activeElement: {
+        tagName: "textarea",
+      },
+      visualViewportHeight: null,
+    });
+
+    harness.emitBridgeMessage({
+      type: "persisted-atom-sync",
+      state: {
+        "enter-behavior": "enter",
+        "agent-mode": "auto",
+      },
+    });
+
+    expect(harness.dispatchedMessages).toContainEqual({
+      type: "persisted-atom-sync",
+      state: {
+        "enter-behavior": "newline",
+        "agent-mode": "auto",
+      },
+    });
+
+    harness.setActiveElement(null);
+
+    expect(harness.dispatchedMessages.at(-1)).toEqual({
+      type: "persisted-atom-updated",
+      key: "enter-behavior",
+      value: "enter",
+      deleted: false,
+    });
+  });
+
+  it("includes home-directory path shortening in the import dialog bootstrap", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+    expect(script).toMatch(
+      /currentFolderPath\.textContent\s*=\s*currentRoot\s*\?\s*formatDesktopImportPath\(currentRoot\)/,
+    );
+    expect(script).toMatch(/entryPath\.textContent\s*=\s*formatDesktopImportPath\(entry\.path\)/);
+    expect(script).toMatch(/\^\\\/\(\?:users\|home\)\\\/\[\^\/\]\+\(\?=\\\/\|\$\)\/i/);
+    expect(script).toMatch(
+      /trimmedPath\.replace\(\s*\/\^\\\/\(\?:users\|home\)\\\/\[\^\/\]\+\(\?=\\\/\|\$\)\/i,\s*"~"\s*\)/,
+    );
   });
 
   it("restores the desktop sidebar mode from browser storage and persists later changes", async () => {
@@ -3792,5 +4196,24 @@ describe("renderBootstrapScript", () => {
     expect(
       harness.document.querySelector('[data-pocodex-workspace-root-picker-dialog="true"]'),
     ).toBeNull();
+  });
+
+  it("includes the host workspace-root shim in the bootstrap", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    expect(script).toContain("pocodex-open-workspace-root-dialog");
+    expect(script).toContain("workspace-root-browser/list");
+    expect(script).toContain("workspace-root-option/add");
+    expect(script).toContain("workspace-root-option-added");
+    expect(script).toContain("workspace-root-option-picked");
   });
 });

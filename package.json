@@ -10,7 +10,13 @@
     "openai",
     "wsl"
   ],
+  "homepage": "https://www.pocodex.app",
   "license": "Apache-2.0",
+  "author": {
+    "name": "Dave Jeffery",
+    "email": "dave@davejeffery.com",
+    "url": "https://www.pocodex.app"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/davej/pocodex"
@@ -28,12 +34,26 @@
     "linux"
   ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
-    "build": "rm -rf dist && tsgo -p tsconfig.json && pnpm run build:static",
+    "build": "rm -rf dist && pnpm exec tsgo -p tsconfig.json && pnpm run build:static",
     "build:static": "mkdir -p dist/images && cp src/pocodex.css dist/pocodex.css && cp src/images/import.svg dist/images/import.svg",
-    "check": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck",
+    "check:site": "pnpm --filter pocodex-site check",
+    "check:commit": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck",
+    "build:tray": "pnpm --filter pocodex-tray build",
+    "check": "pnpm run fmt:check && pnpm run lint && pnpm run typecheck && pnpm test",
     "commitmsg": "commitlint --edit",
     "dev": "tsx src/cli.ts --dev",
+    "dev:site": "pnpm --filter pocodex-site dev",
+    "dev:tray": "pnpm --filter pocodex-tray dev",
     "dev:watch": "tsx watch src/cli.ts --dev",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
@@ -41,8 +61,10 @@
     "lint:fix": "oxlint --fix .",
     "prepare": "simple-git-hooks",
     "prepack": "pnpm run build",
-    "test": "vitest run ./test",
-    "typecheck": "tsgo --noEmit"
+    "site:deploy": "pnpm --filter pocodex-site deploy",
+    "test": "pnpm run build && vitest run ./test",
+    "todesktop:build": "pnpm --filter pocodex-tray build && todesktop build --config apps/tray/todesktop.json",
+    "typecheck": "pnpm exec tsgo --noEmit"
   },
   "dependencies": {
     "@electron/asar": "^4.1.0",
@@ -63,13 +85,14 @@
     "@typescript/native-preview": "^7.0.0-dev.20260312.1",
     "oxfmt": "^0.39.0",
     "oxlint": "^1.54.0",
+    "playwright": "^1.58.2",
     "simple-git-hooks": "^2.13.1",
     "tsx": "^4.21.0",
     "vitest": "^4.0.18"
   },
   "simple-git-hooks": {
     "commit-msg": "pnpm run commitmsg -- $1",
-    "pre-commit": "pnpm run check"
+    "pre-commit": "pnpm run check:commit"
   },
   "engines": {
     "node": ">=24"

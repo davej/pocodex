@@ -192,6 +192,27 @@ describe("PocodexServer", () => {
     await expect(response.text()).resolves.toContain("pocodex-shell:test");
   });
 
+  it("serves the app shell for client-side thread routes", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/local/thread-1`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    await expect(response.text()).resolves.toBe("<!doctype html><html><body></body></html>");
+  });
+
+  it("still returns 404 for missing asset paths", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/assets/missing.js`);
+
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.toBe("Not found");
+  });
+
   it("validates session tokens before websocket attach", async () => {
     const { server, url } = await createTestServer();
     servers.push(server);

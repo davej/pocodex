@@ -1,0 +1,16 @@
+{
+  "name": "pocodex-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "pnpm exec tsc --noEmit -p tsconfig.json",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "wrangler": "^4.9.1"
+  }
+}

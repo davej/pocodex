@@ -38,6 +38,7 @@ If you are running from WSL, `pnpm run dev -- --app 'C:\Program Files\WindowsApp
 ## Useful Commands
 
 ```bash
+pnpm run check:commit
 pnpm run build
 pnpm run check
 pnpm run typecheck
@@ -47,7 +48,8 @@ pnpm run test
 ## Commit And Release Policy
 
 - Commits must use Conventional Commits. The local `commit-msg` hook enforces this with `commitlint`.
-- Run `pnpm run check` before committing if you bypass hooks or want an explicit local validation pass.
+- The local `pre-commit` hook runs `pnpm run check:commit` for formatting, lint, and type checks without running tests.
+- Run `pnpm run check` when you want the full local validation pass, including tests.
 - Releases are managed by `release-please` from commits merged into `main`, so `feat`, `fix`, and `!`/`BREAKING CHANGE:` markers drive versioning and changelog entries.
 
 For runtime logging:

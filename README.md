@@ -8,6 +8,10 @@ It serves the real Codex desktop webview from the installed app bundle, reuses t
 
 ## Install
 
+Download the desktop app from [download.pocodex.app](https://download.pocodex.app/).
+
+Or install the CLI:
+
 ```bash
 pnpm add -g pocodex
 ```

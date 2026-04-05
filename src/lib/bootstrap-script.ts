@@ -60,6 +60,26 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     isConfirming: boolean;
   };
 
+  type WorkspaceRootDialogMode = "add" | "pick";
+
+  type WorkspaceRootAddResult = {
+    success: boolean;
+    root: string;
+    error?: string;
+  };
+
+  type WorkspaceRootBrowserEntry = {
+    name: string;
+    path: string;
+  };
+
+  type WorkspaceRootBrowserResult = {
+    root: string;
+    parentRoot: string | null;
+    homeDir: string;
+    entries: WorkspaceRootBrowserEntry[];
+  };
+
   type SessionValidationResult =
     | { ok: true }
     | { ok: false; reason: "unauthorized" | "unavailable" };
@@ -88,6 +108,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   const INDEX_HTML_PATHNAME = "/index.html";
   const LOCAL_HOST_ID = "local";
   const LOCAL_THREAD_ROUTE_PREFIX = "/local/";
+  const LAST_ROUTE_STORAGE_KEY = "__pocodex_last_route";
+  const ENTER_BEHAVIOR_ATOM_KEY = "enter-behavior";
+  const ENTER_BEHAVIOR_NEWLINE = "newline";
+  const SOFT_KEYBOARD_INSET_THRESHOLD_PX = 120;
   const RETRY_DELAYS_MS = [1000, 2000, 5000, 8000, 12000] as const;
   const SESSION_CHECK_PATH = "/session-check";
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
@@ -98,11 +122,24 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   const HEARTBEAT_MONITOR_INTERVAL_MS = 5_000;
   const WAKE_GRACE_PERIOD_MS = 10_000;
   const RELOAD_REQUIRED_FAILURE_COUNT = 6;
+  const NON_TEXT_INPUT_TYPES = new Set([
+    "button",
+    "checkbox",
+    "color",
+    "file",
+    "hidden",
+    "image",
+    "radio",
+    "range",
+    "reset",
+    "submit",
+  ]);
 
   const workerSubscribers = new Map<string, Set<WorkerMessageListener>>();
   const pendingMessages: string[] = [];
   const toastHost = document.createElement("div");
   const statusHost = document.createElement("div");
+  const importHost = document.createElement("div");
   const workspaceRootPickerHost = document.createElement("div");
 
   let socket: WebSocket | null = null;
@@ -110,7 +147,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   let reconnectAttempt = 0;
   let isClosing = false;
   let isOpenInAppObserverStarted = false;
+  let isEnterBehaviorOverrideObserverStarted = false;
   let hasConnected = false;
+  let hasSeenHostEnterBehavior = false;
+  let hostEnterBehaviorDeleted = true;
+  let hostEnterBehaviorValue: unknown = undefined;
+  let hasDispatchedEnterBehavior = false;
+  let dispatchedEnterBehaviorDeleted = true;
+  let dispatchedEnterBehaviorValue: unknown = undefined;
   let nextIpcRequestId = 0;
   let connectionPhase: ConnectionPhase = "reconnecting";
   let reconnectTimer: number | null = null;
@@ -134,11 +178,17 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   toastHost.id = "pocodex-toast-host";
   statusHost.id = "pocodex-status-host";
+  importHost.id = "pocodex-import-host";
+  importHost.hidden = true;
   workspaceRootPickerHost.id = "pocodex-workspace-root-picker-host";
   workspaceRootPickerHost.hidden = true;
   document.documentElement.dataset.pocodex = "true";
+  getStoredToken();
+  restoreStoredRouteIfNeeded();
   normalizeBrowserUrlForRefresh();
   syncRouteDataset();
+  installRoutePersistence();
+  installEnterBehaviorOverrideObservers();
 
   runWhenDocumentReady(() => {
     ensureStylesheetLink(config.stylesheetHref);
@@ -1409,6 +1459,359 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
+  function openWorkspaceRootDialog(mode: WorkspaceRootDialogMode): void {
+    ensureHostAttached(importHost);
+    importHost.hidden = false;
+    importHost.replaceChildren();
+
+    const backdrop = document.createElement("div");
+    backdrop.dataset.pocodexImportBackdrop = "true";
+
+    const dialog = document.createElement("section");
+    dialog.dataset.pocodexImportDialog = "true";
+
+    const header = document.createElement("div");
+    header.dataset.pocodexImportHeader = "true";
+
+    const title = document.createElement("h2");
+    title.textContent = mode === "pick" ? "Open project folder" : "Add project folder";
+
+    const subtitle = document.createElement("p");
+    subtitle.textContent =
+      mode === "pick"
+        ? "Browse the host filesystem and open the current folder in Pocodex."
+        : "Browse the host filesystem and add the current folder as another project in Pocodex.";
+
+    header.append(title, subtitle);
+
+    const browserShell = document.createElement("div");
+    browserShell.dataset.pocodexWorkspaceBrowser = "true";
+
+    const sidebar = document.createElement("aside");
+    sidebar.dataset.pocodexWorkspaceSidebar = "true";
+
+    const sidebarTitle = document.createElement("p");
+    sidebarTitle.dataset.pocodexWorkspaceSidebarTitle = "true";
+    sidebarTitle.textContent = "Folder tree";
+
+    const tree = document.createElement("ul");
+    tree.dataset.pocodexWorkspaceTree = "true";
+
+    sidebar.append(sidebarTitle, tree);
+
+    const mainPanel = document.createElement("section");
+    mainPanel.dataset.pocodexWorkspaceMain = "true";
+
+    const mobileLocation = document.createElement("div");
+    mobileLocation.dataset.pocodexWorkspaceMobileLocation = "true";
+
+    const mobileLocationSummary = document.createElement("div");
+    mobileLocationSummary.dataset.pocodexWorkspaceMobileLocationSummary = "true";
+
+    const mobileLocationName = document.createElement("strong");
+    mobileLocationName.dataset.pocodexWorkspaceMobileLocationName = "true";
+
+    const mobileLocationToggle = document.createElement("button");
+    mobileLocationToggle.type = "button";
+    mobileLocationToggle.dataset.pocodexWorkspaceMobileToggle = "true";
+
+    mobileLocationSummary.append(mobileLocationName, mobileLocationToggle);
+
+    const mobileLocationPath = document.createElement("div");
+    mobileLocationPath.dataset.pocodexWorkspaceMobilePath = "true";
+
+    const mobileLocationPathValue = document.createElement("code");
+
+    const mobileLocationPathNav = document.createElement("div");
+    mobileLocationPathNav.dataset.pocodexWorkspaceMobilePathNav = "true";
+
+    const mobileUpButton = document.createElement("button");
+    mobileUpButton.type = "button";
+    mobileUpButton.dataset.pocodexWorkspaceNavButton = "true";
+    mobileUpButton.textContent = "Up";
+
+    const mobileBreadcrumb = document.createElement("nav");
+    mobileBreadcrumb.dataset.pocodexWorkspaceBreadcrumb = "true";
+
+    mobileLocationPathNav.append(mobileUpButton, mobileBreadcrumb);
+    mobileLocationPath.append(mobileLocationPathValue, mobileLocationPathNav);
+    mobileLocation.append(mobileLocationSummary, mobileLocationPath);
+
+    const toolbar = document.createElement("div");
+    toolbar.dataset.pocodexWorkspaceToolbar = "true";
+
+    const upButton = document.createElement("button");
+    upButton.type = "button";
+    upButton.dataset.pocodexWorkspaceNavButton = "true";
+    upButton.textContent = "Up";
+
+    const breadcrumb = document.createElement("nav");
+    breadcrumb.dataset.pocodexWorkspaceBreadcrumb = "true";
+
+    toolbar.append(upButton, breadcrumb);
+
+    const currentFolder = document.createElement("div");
+    currentFolder.dataset.pocodexWorkspaceCurrent = "true";
+
+    const currentFolderLabel = document.createElement("span");
+    currentFolderLabel.textContent = "Current folder";
+
+    const currentFolderPath = document.createElement("code");
+
+    currentFolder.append(currentFolderLabel, currentFolderPath);
+
+    const listHeader = document.createElement("div");
+    listHeader.dataset.pocodexWorkspaceListHeader = "true";
+
+    const listTitle = document.createElement("strong");
+    listTitle.textContent = "Folders";
+
+    const listMeta = document.createElement("span");
+
+    listHeader.append(listTitle, listMeta);
+
+    const listBody = document.createElement("div");
+    listBody.dataset.pocodexWorkspaceList = "true";
+
+    const status = document.createElement("p");
+    status.dataset.pocodexWorkspaceStatus = "true";
+
+    mainPanel.append(toolbar, currentFolder, listHeader, listBody, status);
+    browserShell.append(sidebar, mainPanel);
+
+    const actions = document.createElement("div");
+    actions.dataset.pocodexImportActions = "true";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.textContent = "Cancel";
+    cancelButton.addEventListener("click", () => {
+      closeImportOverlay();
+    });
+
+    const confirmButton = document.createElement("button");
+    confirmButton.type = "button";
+    confirmButton.dataset.variant = "primary";
+    confirmButton.textContent = mode === "pick" ? "Open this folder" : "Add this folder";
+
+    const directoryCache = new Map<string, WorkspaceRootBrowserResult>();
+    const expandedRoots = new Set<string>();
+    let treeRoot = "";
+    let currentRoot = "";
+    let homeDir = "";
+    let loadingRoot = "";
+    let isMobilePathExpanded = false;
+    let isLoading = false;
+    let loadError = "";
+
+    const render = () => {
+      const currentDirectory = currentRoot ? (directoryCache.get(currentRoot) ?? null) : null;
+      const currentFolderLabel = getWorkspaceRootDisplayName(currentRoot, homeDir);
+      currentFolderPath.textContent = currentRoot
+        ? formatDesktopImportPath(currentRoot)
+        : "Loading...";
+      mobileLocationName.textContent = currentFolderLabel;
+      mobileLocationPathValue.textContent = currentRoot
+        ? formatDesktopImportPath(currentRoot)
+        : "Loading...";
+      mobileLocationToggle.textContent = isMobilePathExpanded ? "▴" : "▾";
+      mobileLocationToggle.disabled = currentRoot.length === 0;
+      mobileLocationToggle.setAttribute("aria-expanded", String(isMobilePathExpanded));
+      mobileLocationToggle.setAttribute(
+        "aria-label",
+        isMobilePathExpanded ? "Hide full path navigation" : "Show full path navigation",
+      );
+      mobileLocationPath.hidden = !isMobilePathExpanded;
+      confirmButton.disabled = isLoading || currentRoot.length === 0;
+      upButton.disabled = isLoading || !currentDirectory?.parentRoot;
+      mobileUpButton.disabled = upButton.disabled;
+      listMeta.textContent =
+        currentDirectory && currentDirectory.entries.length > 0
+          ? `${currentDirectory.entries.length} folders`
+          : "";
+
+      renderWorkspaceRootBreadcrumbs(breadcrumb, currentRoot, homeDir, (root) => {
+        void openDirectory(root);
+      });
+      renderWorkspaceRootBreadcrumbs(mobileBreadcrumb, currentRoot, homeDir, (root) => {
+        void openDirectory(root);
+        isMobilePathExpanded = false;
+        render();
+      });
+      renderWorkspaceRootTree(tree, {
+        treeRoot,
+        currentRoot,
+        homeDir,
+        directoryCache,
+        expandedRoots,
+        onOpen(root) {
+          void openDirectory(root);
+        },
+      });
+
+      listBody.replaceChildren();
+      status.hidden = true;
+      status.textContent = "";
+
+      if (loadError) {
+        status.hidden = false;
+        status.textContent = loadError;
+        return;
+      }
+
+      if (isLoading && (!currentDirectory || loadingRoot === currentRoot)) {
+        status.hidden = false;
+        status.textContent = "Loading folders...";
+        return;
+      }
+
+      if (!currentDirectory) {
+        return;
+      }
+
+      if (currentDirectory.entries.length === 0) {
+        status.hidden = false;
+        status.textContent = "No folders are available here.";
+        return;
+      }
+
+      for (const entry of currentDirectory.entries) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.dataset.pocodexWorkspaceEntry = "true";
+
+        const entryName = document.createElement("strong");
+        entryName.textContent = entry.name;
+
+        const entryPath = document.createElement("span");
+        entryPath.textContent = formatDesktopImportPath(entry.path);
+
+        row.append(entryName, entryPath);
+        row.addEventListener("click", () => {
+          void openDirectory(entry.path);
+        });
+        listBody.appendChild(row);
+      }
+    };
+
+    const openDirectory = async (root?: string): Promise<void> => {
+      isLoading = true;
+      loadError = "";
+      loadingRoot = root ?? "";
+      render();
+
+      try {
+        const result = await listWorkspaceRootBrowserFromHost(root);
+        directoryCache.set(result.root, result);
+        currentRoot = result.root;
+        homeDir = result.homeDir;
+        expandedRoots.add(result.root);
+        if (!treeRoot || !isWorkspaceRootPathWithin(treeRoot, result.root)) {
+          treeRoot = result.root;
+        }
+        isLoading = false;
+        loadingRoot = "";
+        render();
+      } catch (error) {
+        isLoading = false;
+        loadingRoot = "";
+        loadError =
+          error instanceof Error
+            ? error.message
+            : "Failed to load folders from the host filesystem.";
+        render();
+      }
+    };
+
+    const submit = async () => {
+      if (!currentRoot) {
+        return;
+      }
+
+      confirmButton.disabled = true;
+      cancelButton.disabled = true;
+      confirmButton.textContent = mode === "pick" ? "Opening..." : "Adding...";
+
+      try {
+        const result = await addWorkspaceRootFromHost({
+          root: currentRoot,
+          setActive: mode === "pick",
+        });
+        if (!result.success) {
+          throw new Error(result.error || "Failed to add project from the host filesystem.");
+        }
+
+        closeImportOverlay();
+        dispatchHostMessage({
+          type: mode === "pick" ? "workspace-root-option-picked" : "workspace-root-option-added",
+          root: result.root,
+        });
+        showNotice(
+          mode === "pick"
+            ? "Opened project from the host filesystem."
+            : "Added project from the host filesystem.",
+        );
+      } catch (error) {
+        confirmButton.textContent = mode === "pick" ? "Open this folder" : "Add this folder";
+        cancelButton.disabled = false;
+        confirmButton.disabled = currentRoot.length === 0;
+        showNotice(
+          error instanceof Error
+            ? error.message
+            : "Failed to add project from the host filesystem.",
+        );
+      }
+    };
+
+    upButton.addEventListener("click", () => {
+      const currentDirectory = currentRoot ? (directoryCache.get(currentRoot) ?? null) : null;
+      if (currentDirectory?.parentRoot) {
+        void openDirectory(currentDirectory.parentRoot);
+      }
+    });
+    mobileUpButton.addEventListener("click", () => {
+      const currentDirectory = currentRoot ? (directoryCache.get(currentRoot) ?? null) : null;
+      if (currentDirectory?.parentRoot) {
+        isMobilePathExpanded = false;
+        void openDirectory(currentDirectory.parentRoot);
+      }
+    });
+    mobileLocationToggle.addEventListener("click", () => {
+      if (!currentRoot) {
+        return;
+      }
+      isMobilePathExpanded = !isMobilePathExpanded;
+      render();
+    });
+    confirmButton.addEventListener("click", () => {
+      void submit();
+    });
+
+    actions.append(cancelButton, confirmButton);
+    mainPanel.prepend(mobileLocation);
+    dialog.append(header, browserShell, actions);
+    backdrop.appendChild(dialog);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target !== backdrop) {
+        return;
+      }
+      closeImportOverlay();
+    });
+
+    importHost.appendChild(backdrop);
+    render();
+    void openDirectory();
+  }
+
+  function formatDesktopImportPath(path: string): string {
+    const trimmedPath = path.trim();
+    if (trimmedPath.length === 0) {
+      return path;
+    }
+
+    return trimmedPath.replace(/^\/(?:users|home)\/[^/]+(?=\/|$)/i, "~");
+  }
+
   function normalizeWorkspaceRootPickerPathInput(path: string): string {
     const trimmedPath = path.trim();
     if (
@@ -1450,6 +1853,11 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     } catch {
       return false;
     }
+  }
+
+  function closeImportOverlay(): void {
+    importHost.hidden = true;
+    importHost.replaceChildren();
   }
 
   function readWorkspaceRootPickerCreateTarget(path: string): {
@@ -1594,6 +2002,27 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     );
   }
 
+  async function addWorkspaceRootFromHost(params: {
+    root: string;
+    setActive: boolean;
+  }): Promise<WorkspaceRootAddResult> {
+    const result = await callPocodexIpc("workspace-root-option/add", params);
+    if (!isWorkspaceRootAddResult(result)) {
+      throw new Error("Pocodex returned an invalid workspace-root response.");
+    }
+    return result;
+  }
+
+  async function listWorkspaceRootBrowserFromHost(
+    root?: string,
+  ): Promise<WorkspaceRootBrowserResult> {
+    const result = await callPocodexIpc("workspace-root-browser/list", root ? { root } : undefined);
+    if (!isWorkspaceRootBrowserResult(result)) {
+      throw new Error("Pocodex returned an invalid workspace-root browser response.");
+    }
+    return result;
+  }
+
   function isWorkspaceRootPickerListResult(value: unknown): value is WorkspaceRootPickerListResult {
     return (
       isRecord(value) &&
@@ -1614,6 +2043,218 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   function readWorkspaceRootPickerConfirmAction(result: unknown): "activated" | "added" {
     return isRecord(result) && result.action === "activated" ? "activated" : "added";
+  }
+
+  function isWorkspaceRootAddResult(value: unknown): value is WorkspaceRootAddResult {
+    return (
+      isRecord(value) &&
+      typeof value.success === "boolean" &&
+      typeof value.root === "string" &&
+      (value.error === undefined || typeof value.error === "string")
+    );
+  }
+
+  function isWorkspaceRootBrowserResult(value: unknown): value is WorkspaceRootBrowserResult {
+    return (
+      isRecord(value) &&
+      typeof value.root === "string" &&
+      (value.parentRoot === null || typeof value.parentRoot === "string") &&
+      typeof value.homeDir === "string" &&
+      Array.isArray(value.entries) &&
+      value.entries.every(
+        (entry) =>
+          isRecord(entry) && typeof entry.name === "string" && typeof entry.path === "string",
+      )
+    );
+  }
+
+  function getWorkspaceRootDisplayName(root: string, homeDir: string): string {
+    if (!root) {
+      return "Loading...";
+    }
+
+    const normalizedRoot = normalizeWorkspaceRootBrowserPath(root);
+    if (normalizedRoot === "/") {
+      return "/";
+    }
+    if (normalizedRoot === homeDir) {
+      return "~";
+    }
+
+    const parts = normalizedRoot.split("/").filter((part) => part.length > 0);
+    return parts.at(-1) ?? normalizedRoot;
+  }
+
+  function renderWorkspaceRootBreadcrumbs(
+    host: HTMLElement,
+    currentRoot: string,
+    homeDir: string,
+    onOpen: (root: string) => void,
+  ): void {
+    host.replaceChildren();
+    if (!currentRoot) {
+      return;
+    }
+
+    const segments = getWorkspaceRootPathSegments(currentRoot, homeDir);
+    for (const segment of segments) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = segment.label;
+      button.addEventListener("click", () => {
+        onOpen(segment.path);
+      });
+      host.appendChild(button);
+    }
+  }
+
+  function getWorkspaceRootPathSegments(
+    root: string,
+    homeDir: string,
+  ): Array<{ label: string; path: string }> {
+    const normalized = normalizeWorkspaceRootBrowserPath(root);
+    if (normalized === "/") {
+      return [{ label: "/", path: "/" }];
+    }
+
+    const parts = normalized.split("/").filter((part) => part.length > 0);
+    const segments: Array<{ label: string; path: string }> = [];
+    let current = "";
+    for (const part of parts) {
+      current += `/${part}`;
+      segments.push({
+        label: current === homeDir ? "~" : part,
+        path: current,
+      });
+    }
+    return segments;
+  }
+
+  function renderWorkspaceRootTree(
+    host: HTMLElement,
+    options: {
+      treeRoot: string;
+      currentRoot: string;
+      homeDir: string;
+      directoryCache: Map<string, WorkspaceRootBrowserResult>;
+      expandedRoots: Set<string>;
+      onOpen: (root: string) => void;
+    },
+  ): void {
+    host.replaceChildren();
+    if (!options.treeRoot) {
+      return;
+    }
+
+    host.appendChild(
+      createWorkspaceRootTreeItem(options.treeRoot, {
+        currentRoot: options.currentRoot,
+        homeDir: options.homeDir,
+        directoryCache: options.directoryCache,
+        expandedRoots: options.expandedRoots,
+        onOpen: options.onOpen,
+      }),
+    );
+  }
+
+  function createWorkspaceRootTreeItem(
+    root: string,
+    options: {
+      currentRoot: string;
+      homeDir: string;
+      directoryCache: Map<string, WorkspaceRootBrowserResult>;
+      expandedRoots: Set<string>;
+      onOpen: (root: string) => void;
+    },
+  ): HTMLLIElement {
+    const item = document.createElement("li");
+    item.dataset.pocodexWorkspaceTreeItem = "true";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.pocodexWorkspaceTreeButton = "true";
+    if (root === options.currentRoot) {
+      button.dataset.current = "true";
+    }
+
+    const isExpanded = options.expandedRoots.has(root);
+    const currentDirectory = options.directoryCache.get(root);
+
+    const caret = document.createElement("span");
+    caret.dataset.pocodexWorkspaceTreeCaret = "true";
+    caret.textContent = isExpanded && currentDirectory ? "▾" : "▸";
+
+    const label = document.createElement("span");
+    label.textContent = getWorkspaceRootTreeLabel(root, options.homeDir);
+
+    button.append(caret, label);
+    button.addEventListener("click", () => {
+      options.expandedRoots.add(root);
+      options.onOpen(root);
+    });
+
+    item.appendChild(button);
+
+    if (isExpanded && currentDirectory && currentDirectory.entries.length > 0) {
+      const subtree = document.createElement("ul");
+      subtree.dataset.pocodexWorkspaceTree = "true";
+      for (const entry of currentDirectory.entries) {
+        if (
+          !options.expandedRoots.has(entry.path) &&
+          entry.path !== options.currentRoot &&
+          !isWorkspaceRootPathWithin(entry.path, options.currentRoot)
+        ) {
+          continue;
+        }
+        subtree.appendChild(
+          createWorkspaceRootTreeItem(entry.path, {
+            currentRoot: options.currentRoot,
+            homeDir: options.homeDir,
+            directoryCache: options.directoryCache,
+            expandedRoots: options.expandedRoots,
+            onOpen: options.onOpen,
+          }),
+        );
+      }
+      if (subtree.childNodes.length > 0) {
+        item.appendChild(subtree);
+      }
+    }
+
+    return item;
+  }
+
+  function getWorkspaceRootTreeLabel(root: string, homeDir: string): string {
+    if (root === homeDir) {
+      return "~";
+    }
+
+    const normalized = normalizeWorkspaceRootBrowserPath(root);
+    if (normalized === "/") {
+      return "/";
+    }
+
+    const parts = normalized.split("/").filter((part) => part.length > 0);
+    return parts.at(-1) ?? normalized;
+  }
+
+  function isWorkspaceRootPathWithin(parent: string, child: string): boolean {
+    const normalizedParent = normalizeWorkspaceRootBrowserPath(parent);
+    const normalizedChild = normalizeWorkspaceRootBrowserPath(child);
+    if (normalizedParent === "/") {
+      return normalizedChild.startsWith("/");
+    }
+    return (
+      normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}/`)
+    );
+  }
+
+  function normalizeWorkspaceRootBrowserPath(path: string): string {
+    if (!path) {
+      return "/";
+    }
+
+    return path.length > 1 ? path.replace(/\/+$/, "") : path;
   }
 
   function readEventKey(event: unknown): string {
@@ -1650,29 +2291,216 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
-  function rewriteBridgeMessageForViewport(message: unknown): unknown {
-    if (!isMobileSidebarViewport() || !isRecord(message) || typeof message.type !== "string") {
+  function installEnterBehaviorOverrideObservers(): void {
+    if (isEnterBehaviorOverrideObserverStarted) {
+      return;
+    }
+
+    isEnterBehaviorOverrideObserverStarted = true;
+    document.addEventListener("focusin", refreshEffectiveEnterBehavior, true);
+    document.addEventListener("focusout", refreshEffectiveEnterBehavior, true);
+    window.addEventListener("resize", refreshEffectiveEnterBehavior);
+    window.visualViewport?.addEventListener("resize", refreshEffectiveEnterBehavior);
+  }
+
+  function rewriteBridgeMessageForLocalOverrides(message: unknown): unknown {
+    rememberHostEnterBehavior(message);
+
+    if (!isRecord(message) || typeof message.type !== "string") {
+      return message;
+    }
+
+    const overriddenMessage = overrideEnterBehaviorInMessage(message);
+    rememberDispatchedEnterBehavior(overriddenMessage);
+    syncSidebarModeWithBridgeMessage(overriddenMessage);
+    syncThreadQueryWithBridgeMessage(overriddenMessage);
+    return overriddenMessage;
+  }
+
+  function overrideEnterBehaviorInMessage(message: Record<string, unknown>): unknown {
+    if (!shouldForceNewlineEnterBehavior()) {
       return message;
     }
 
     if (message.type === "persisted-atom-sync") {
       const state = isRecord(message.state) ? { ...message.state } : {};
-      state["enter-behavior"] = "newline";
+      state[ENTER_BEHAVIOR_ATOM_KEY] = ENTER_BEHAVIOR_NEWLINE;
       return {
         ...message,
         state,
       };
     }
 
-    if (message.type === "persisted-atom-updated" && message.key === "enter-behavior") {
+    if (message.type === "persisted-atom-updated" && message.key === ENTER_BEHAVIOR_ATOM_KEY) {
       return {
         ...message,
-        value: "newline",
+        value: ENTER_BEHAVIOR_NEWLINE,
         deleted: false,
       };
     }
 
     return message;
+  }
+
+  function rememberHostEnterBehavior(message: unknown): void {
+    const state = getEnterBehaviorStateFromMessage(message);
+    if (!state) {
+      return;
+    }
+
+    hasSeenHostEnterBehavior = true;
+    hostEnterBehaviorDeleted = state.deleted;
+    hostEnterBehaviorValue = state.value;
+  }
+
+  function rememberDispatchedEnterBehavior(message: unknown): void {
+    const state = getEnterBehaviorStateFromMessage(message);
+    if (!state) {
+      return;
+    }
+
+    hasDispatchedEnterBehavior = true;
+    dispatchedEnterBehaviorDeleted = state.deleted;
+    dispatchedEnterBehaviorValue = state.value;
+  }
+
+  function getEnterBehaviorStateFromMessage(
+    message: unknown,
+  ): { deleted: boolean; value: unknown } | null {
+    if (!isRecord(message) || typeof message.type !== "string") {
+      return null;
+    }
+
+    if (message.type === "persisted-atom-sync") {
+      const state = isRecord(message.state) ? message.state : null;
+      if (state && Object.prototype.hasOwnProperty.call(state, ENTER_BEHAVIOR_ATOM_KEY)) {
+        return {
+          deleted: false,
+          value: state[ENTER_BEHAVIOR_ATOM_KEY],
+        };
+      }
+
+      return {
+        deleted: true,
+        value: undefined,
+      };
+    }
+
+    if (
+      message.type === "persisted-atom-updated" &&
+      typeof message.key === "string" &&
+      message.key === ENTER_BEHAVIOR_ATOM_KEY
+    ) {
+      return {
+        deleted: message.deleted === true,
+        value: message.value,
+      };
+    }
+
+    return null;
+  }
+
+  function refreshEffectiveEnterBehavior(): void {
+    if (!hasSeenHostEnterBehavior) {
+      return;
+    }
+
+    const next = getEffectiveEnterBehaviorState();
+    if (
+      hasDispatchedEnterBehavior &&
+      dispatchedEnterBehaviorDeleted === next.deleted &&
+      Object.is(dispatchedEnterBehaviorValue, next.value)
+    ) {
+      return;
+    }
+
+    hasDispatchedEnterBehavior = true;
+    dispatchedEnterBehaviorDeleted = next.deleted;
+    dispatchedEnterBehaviorValue = next.value;
+    dispatchHostMessage({
+      type: "persisted-atom-updated",
+      key: ENTER_BEHAVIOR_ATOM_KEY,
+      value: next.value,
+      deleted: next.deleted,
+    });
+  }
+
+  function getEffectiveEnterBehaviorState(): { deleted: boolean; value: unknown } {
+    if (shouldForceNewlineEnterBehavior()) {
+      return {
+        deleted: false,
+        value: ENTER_BEHAVIOR_NEWLINE,
+      };
+    }
+
+    return {
+      deleted: hostEnterBehaviorDeleted,
+      value: hostEnterBehaviorValue,
+    };
+  }
+
+  function shouldForceNewlineEnterBehavior(): boolean {
+    if (!isTextEntryFocused()) {
+      return false;
+    }
+
+    const keyboardInset = getSoftKeyboardViewportInset();
+    if (keyboardInset !== null) {
+      return keyboardInset >= SOFT_KEYBOARD_INSET_THRESHOLD_PX;
+    }
+
+    return supportsTouchInput();
+  }
+
+  function getSoftKeyboardViewportInset(): number | null {
+    const visualViewport = window.visualViewport;
+    if (!visualViewport || typeof visualViewport.height !== "number") {
+      return null;
+    }
+
+    const layoutViewportHeight = typeof window.innerHeight === "number" ? window.innerHeight : 0;
+    if (layoutViewportHeight <= 0) {
+      return null;
+    }
+
+    return Math.max(0, layoutViewportHeight - visualViewport.height);
+  }
+
+  function supportsTouchInput(): boolean {
+    if (typeof navigator !== "undefined" && typeof navigator.maxTouchPoints === "number") {
+      if (navigator.maxTouchPoints > 0) {
+        return true;
+      }
+    }
+
+    if (typeof window.matchMedia === "function") {
+      return window.matchMedia("(pointer: coarse)").matches;
+    }
+
+    return false;
+  }
+
+  function isTextEntryFocused(): boolean {
+    const activeElement = document.activeElement;
+    return activeElement instanceof Element && isTextEntryElement(activeElement);
+  }
+
+  function isTextEntryElement(element: Element): boolean {
+    if (element.tagName === "TEXTAREA") {
+      return true;
+    }
+
+    const contentEditable = element.getAttribute("contenteditable");
+    if (contentEditable === "" || contentEditable === "true") {
+      return true;
+    }
+
+    if (element.tagName !== "INPUT") {
+      return false;
+    }
+
+    const inputType = element.getAttribute("type")?.trim().toLowerCase() ?? "text";
+    return !NON_TEXT_INPUT_TYPES.has(inputType);
   }
 
   function handlePocodexBridgeMessage(message: unknown): boolean {
@@ -1684,6 +2512,12 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       const context = message.context === "onboarding" ? "onboarding" : "manual";
       const initialPath = typeof message.initialPath === "string" ? message.initialPath : "";
       void openWorkspaceRootPicker(context, initialPath);
+      return true;
+    }
+
+    if (message.type === "pocodex-open-workspace-root-dialog") {
+      const mode = message.mode === "pick" ? "pick" : "add";
+      openWorkspaceRootDialog(mode);
       return true;
     }
 
@@ -1958,6 +2792,85 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       });
     } catch {
       // Service workers require a secure context outside localhost. Ignore failures silently.
+    }
+  }
+
+  function restoreStoredRouteIfNeeded(): void {
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.pathname !== "/" && currentUrl.pathname !== "/index.html") {
+      return;
+    }
+
+    const storedRoute = readSessionStorage(LAST_ROUTE_STORAGE_KEY);
+    if (!storedRoute) {
+      return;
+    }
+
+    try {
+      window.history.replaceState(null, "", storedRoute);
+    } catch {
+      // Ignore history update failures and keep the current route.
+    }
+  }
+
+  function installRoutePersistence(): void {
+    const historyObject = window.history;
+    if (!historyObject) {
+      return;
+    }
+
+    const originalPushState =
+      typeof historyObject.pushState === "function"
+        ? historyObject.pushState.bind(historyObject)
+        : null;
+    const originalReplaceState =
+      typeof historyObject.replaceState === "function"
+        ? historyObject.replaceState.bind(historyObject)
+        : null;
+
+    if (originalPushState) {
+      historyObject.pushState = (data, unused, url) => {
+        originalPushState(data, unused, url);
+        persistCurrentRoute();
+      };
+    }
+
+    if (originalReplaceState) {
+      historyObject.replaceState = (data, unused, url) => {
+        originalReplaceState(data, unused, url);
+        persistCurrentRoute();
+      };
+    }
+
+    window.addEventListener("popstate", persistCurrentRoute);
+    window.addEventListener("hashchange", persistCurrentRoute);
+    persistCurrentRoute();
+  }
+
+  function persistCurrentRoute(): void {
+    writeSessionStorage(LAST_ROUTE_STORAGE_KEY, buildRestorableRoute(window.location.href));
+  }
+
+  function buildRestorableRoute(href: string): string {
+    const url = new URL(href);
+    url.searchParams.delete("token");
+    const route = `${url.pathname}${url.search}${url.hash}`;
+    return route.length > 0 ? route : "/";
+  }
+
+  function readSessionStorage(key: string): string | null {
+    try {
+      return sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeSessionStorage(key: string, value: string): void {
+    try {
+      sessionStorage.setItem(key, value);
+    } catch {
+      // Ignore storage failures when persistence is unavailable.
     }
   }
 
@@ -2308,9 +3221,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       switch (envelope.type) {
         case "bridge_message":
           {
-            const bridgeMessage = rewriteBridgeMessageForViewport(envelope.message);
-            syncSidebarModeWithBridgeMessage(bridgeMessage);
-            syncThreadQueryWithBridgeMessage(bridgeMessage);
+            const bridgeMessage = rewriteBridgeMessageForLocalOverrides(envelope.message);
             if (handlePocodexBridgeMessage(bridgeMessage)) {
               break;
             }

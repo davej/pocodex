@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Use when asked to prepare, review, or create a git commit for this repository. Follow the local commit policy, keep commits scoped to the intended changes, run the required checks, and write Conventional Commits that work with release-please.
+description: Use when asked to prepare, review, or create a git commit for this repository. Follow the local commit policy, keep commits scoped to the intended changes, run the fast required checks, and write Conventional Commits that work with release-please.
 ---
 
 # Commit
@@ -13,7 +13,7 @@ Use this skill when a user asks for a commit or asks how a commit should be writ
 
 1. Inspect the worktree with `git status --short` and `git diff --stat`, then read the diff for the files that are actually part of the requested change.
 2. Exclude unrelated user changes. Do not stage or commit files outside the requested scope.
-3. Run `npm run check` before committing. If it fails, fix the issues or report the blocker instead of committing a broken tree.
+3. Run `pnpm run check:commit` before committing. If it fails, fix the issues or report the blocker instead of committing a broken tree.
 4. Stage only the intended files with `git add <path>...`.
 5. Write a Conventional Commit message that accurately describes the staged diff.
 6. Commit with `git commit`. Prefer a single `-m` subject for small changes, or add a body when the why matters.
@@ -73,9 +73,9 @@ For a normal commit flow in this repo:
 ```bash
 git status --short
 git diff --stat
-npm run check
+pnpm run check:commit
 git add <intended files>
 git commit -m "type(scope): summary"
 ```
 
-Add a second `-m` body when the rationale, migration notes, or breaking-change context matters.
+Run `pnpm run check` separately when you want the full validation pass, including tests. Add a second `-m` body when the rationale, migration notes, or breaking-change context matters.

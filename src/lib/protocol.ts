@@ -31,6 +31,9 @@ export interface HostBridge {
   on(event: "bridge_message", listener: (message: unknown) => void): this;
   on(event: "worker_message", listener: (workerName: string, message: unknown) => void): this;
   on(event: "error", listener: (error: Error) => void): this;
+  off?(event: "bridge_message", listener: (message: unknown) => void): this;
+  off?(event: "worker_message", listener: (workerName: string, message: unknown) => void): this;
+  off?(event: "error", listener: (error: Error) => void): this;
   close(): Promise<void>;
   forwardBridgeMessage(message: unknown): Promise<void>;
   sendWorkerMessage(workerName: string, message: unknown): Promise<void>;
