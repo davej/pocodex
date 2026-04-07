@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      run_todesktop_build:
+        description: Run the manual ToDesktop build job
+        required: false
+        default: true
+        type: boolean
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -44,3 +50,64 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: npm publish --access public
+
+  build-todesktop:
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL: ${{ secrets.TODESKTOP_EMAIL }}
+      HAS_TODESKTOP_SECRETS: ${{ secrets.TODESKTOP_ACCESS_TOKEN != '' && secrets.TODESKTOP_EMAIL != '' }}
+    steps:
+      - name: Skip ToDesktop build when secrets are unavailable
+        if: ${{ env.HAS_TODESKTOP_SECRETS != 'true' }}
+        run: echo "Skipping ToDesktop build because required secrets are not configured."
+      - uses: actions/checkout@v6
+        if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v6
+        if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        with:
+          node-version: 24
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: corepack enable
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: pnpm install --frozen-lockfile
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: pnpm --filter pocodex-tray build
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: pnpm --filter pocodex-tray exec todesktop build --config todesktop.json --async --ephemeral
+
+  build-todesktop-manual:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_todesktop_build }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL: ${{ secrets.TODESKTOP_EMAIL }}
+      HAS_TODESKTOP_SECRETS: ${{ secrets.TODESKTOP_ACCESS_TOKEN != '' && secrets.TODESKTOP_EMAIL != '' }}
+    steps:
+      - name: Skip ToDesktop build when secrets are unavailable
+        if: ${{ env.HAS_TODESKTOP_SECRETS != 'true' }}
+        run: echo "Skipping ToDesktop build because required secrets are not configured."
+      - uses: actions/checkout@v6
+        if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v6
+        if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        with:
+          node-version: 24
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: corepack enable
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: pnpm install --frozen-lockfile
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: pnpm --filter pocodex-tray build
+      - if: ${{ env.HAS_TODESKTOP_SECRETS == 'true' }}
+        run: pnpm --filter pocodex-tray exec todesktop build --config todesktop.json --async --ephemeral

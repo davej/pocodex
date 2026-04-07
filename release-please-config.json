@@ -3,7 +3,9 @@
   "packages": {
     ".": {
       "package-name": "pocodex",
-      "release-type": "node"
+      "exclude-paths": ["apps/site"],
+      "release-type": "node",
+      "extra-files": ["apps/tray/package.json"]
     }
   }
 }

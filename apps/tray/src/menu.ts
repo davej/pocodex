@@ -10,7 +10,7 @@ export interface TrayMenuHandlers {
   copyLocalUrl: () => void;
   openPocodex: () => void;
   quit: () => void;
-  regenerateLanToken: () => void;
+  regenerateAccessToken: () => void;
   resetCodexAppPath: () => void;
   restartPocodex: () => void;
   revealConfigFile: () => void;
@@ -95,14 +95,11 @@ export function buildTrayMenuTemplate(
       label: "Reset Codex.app Path",
       click: handlers.resetCodexAppPath,
     },
+    {
+      label: "Regenerate Access Token",
+      click: handlers.regenerateAccessToken,
+    },
   ];
-
-  if (config.listenMode === "lan") {
-    configItems.push({
-      label: "Regenerate LAN Token",
-      click: handlers.regenerateLanToken,
-    });
-  }
 
   return [
     ...statusItems,

@@ -1,6 +1,34 @@
 import { logoMarkup } from "./logo";
 
-const page = `<!doctype html>
+const githubLatestReleaseUrl = "https://api.github.com/repos/davej/pocodex/releases/latest";
+const releaseCachePath = "/api/latest-release";
+const releaseCacheTtlSeconds = 300;
+const releasesPageUrl = "https://github.com/davej/pocodex/releases";
+
+type GitHubRelease = {
+  body: string | null;
+  html_url: string;
+  name: string | null;
+  published_at: string | null;
+  tag_name: string;
+};
+
+type LatestReleasePayload = {
+  htmlUrl: string;
+  name: string;
+  notesHtml: string;
+  publishedAt: string | null;
+  publishedLabel: string;
+  tagName: string;
+  version: string;
+};
+
+type WorkerExecutionContext = {
+  waitUntil(promise: Promise<unknown>): void;
+};
+
+function renderPage(): string {
+  return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -33,6 +61,14 @@ const page = `<!doctype html>
         background: #fff7eb;
         color: var(--ink);
         font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+      }
+
+      code {
+        padding: 0.1rem 0.35rem;
+        border-radius: 0.35rem;
+        background: rgba(14, 13, 11, 0.08);
+        font-family: "SFMono-Regular", "SF Mono", Consolas, monospace;
+        font-size: 0.92em;
       }
 
       main {
@@ -154,12 +190,108 @@ const page = `<!doctype html>
         font-size: 1.1rem;
       }
 
+      .release {
+        padding: 0 2.25rem 1.8rem;
+      }
+
+      .release-card {
+        padding: 1.35rem;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.56);
+      }
+
+      .release-kicker {
+        display: inline-block;
+        margin-bottom: 0.75rem;
+        padding: 0.28rem 0.55rem;
+        border-radius: 999px;
+        background: rgba(255, 59, 48, 0.12);
+        color: #9f261d;
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .release-header {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: baseline;
+        margin-bottom: 0.45rem;
+      }
+
+      .release-header strong {
+        font-size: clamp(1.35rem, 4vw, 1.8rem);
+        letter-spacing: -0.04em;
+      }
+
+      .release-link {
+        color: inherit;
+        font-size: 0.95rem;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 0.14em;
+      }
+
+      .release-meta {
+        color: rgba(14, 13, 11, 0.68);
+        font-size: 0.95rem;
+      }
+
+      .release-notes {
+        margin-top: 1rem;
+        color: rgba(14, 13, 11, 0.9);
+      }
+
+      .release-notes h3,
+      .release-notes h4 {
+        margin: 1rem 0 0.35rem;
+        letter-spacing: -0.03em;
+      }
+
+      .release-notes h3 {
+        font-size: 1.05rem;
+      }
+
+      .release-notes h4 {
+        font-size: 0.95rem;
+      }
+
+      .release-notes p {
+        max-width: none;
+        font-size: 0.98rem;
+      }
+
+      .release-notes ul {
+        margin: 0.35rem 0 0;
+        padding-left: 1.2rem;
+      }
+
+      .release-notes li {
+        margin: 0.25rem 0;
+        font-size: 0.98rem;
+        line-height: 1.5;
+      }
+
+      .release-notes a {
+        color: inherit;
+      }
+
+      .release-fallback {
+        margin-top: 0.85rem;
+        font-size: 0.92rem;
+      }
+
+      .release-fallback a {
+        color: inherit;
+      }
+
       .footer {
         display: flex;
         justify-content: space-between;
         gap: 1rem;
         padding: 1rem 2.25rem 1.5rem;
-        border-top: 1px solid var(--line);
         font-size: 0.9rem;
         color: rgba(14, 13, 11, 0.65);
       }
@@ -169,7 +301,9 @@ const page = `<!doctype html>
       }
 
       @media (max-width: 640px) {
-        .hero, .footer {
+        .hero,
+        .release,
+        .footer {
           padding-left: 1.35rem;
           padding-right: 1.35rem;
         }
@@ -179,6 +313,11 @@ const page = `<!doctype html>
           gap: 1.35rem;
         }
 
+        .release {
+          padding-bottom: 1.35rem;
+        }
+
+        .release-header,
         .footer {
           flex-direction: column;
         }
@@ -230,24 +369,87 @@ const page = `<!doctype html>
             </div>
           </div>
         </div>
+        <div class="release">
+          <section class="release-card" data-release-card>
+            <div class="release-kicker">Latest Release</div>
+            <div class="release-header">
+              <strong data-release-version>Loading latest release...</strong>
+              <a
+                class="release-link"
+                data-release-link
+                href="${releasesPageUrl}"
+                rel="noreferrer"
+                hidden
+              >
+                View release ↗
+              </a>
+            </div>
+            <p class="release-meta" data-release-meta>
+              Checking GitHub for the latest published version and release notes.
+            </p>
+            <div class="release-notes" data-release-notes hidden></div>
+            <div class="release-fallback">
+              <a href="${releasesPageUrl}" rel="noreferrer">Browse all releases on GitHub</a>
+            </div>
+          </section>
+        </div>
         <div class="footer">
           <span>Remote Codex access, packaged simply.</span>
           <a href="https://download.pocodex.app/">download.pocodex.app</a>
         </div>
       </section>
     </main>
+    <script type="module">
+      const releasesPageUrl = ${JSON.stringify(releasesPageUrl)};
+      const versionElement = document.querySelector("[data-release-version]");
+      const metaElement = document.querySelector("[data-release-meta]");
+      const notesElement = document.querySelector("[data-release-notes]");
+      const linkElement = document.querySelector("[data-release-link]");
+
+      async function loadLatestRelease() {
+        try {
+          const response = await fetch("/api/latest-release", {
+            headers: { Accept: "application/json" },
+          });
+          if (!response.ok) {
+            throw new Error("release fetch failed");
+          }
+
+          const release = await response.json();
+          versionElement.textContent = release.version;
+          metaElement.textContent = "Published " + release.publishedLabel;
+          linkElement.href = release.htmlUrl;
+          linkElement.hidden = false;
+          notesElement.innerHTML = release.notesHtml;
+          notesElement.hidden = false;
+        } catch {
+          versionElement.textContent = "Latest release";
+          metaElement.textContent = "Release details are temporarily unavailable.";
+          linkElement.href = releasesPageUrl;
+          linkElement.hidden = false;
+          notesElement.hidden = true;
+        }
+      }
+
+      void loadLatestRelease();
+    </script>
   </body>
 </html>`;
+}
 
 export default {
-  async fetch(request: Request): Promise<Response> {
-    const { pathname } = new URL(request.url);
+  async fetch(request: Request, _env: unknown, ctx: WorkerExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
 
-    if (pathname === "/favicon.ico") {
+    if (url.pathname === "/favicon.ico") {
       return Response.redirect(new URL("/favicon.png", request.url), 302);
     }
 
-    return new Response(page, {
+    if (url.pathname === releaseCachePath) {
+      return getLatestReleaseResponse(request, ctx);
+    }
+
+    return new Response(renderPage(), {
       headers: {
         "cache-control": "public, max-age=300",
         "content-type": "text/html; charset=UTF-8",
@@ -255,3 +457,178 @@ export default {
     });
   },
 };
+
+async function getLatestReleaseResponse(
+  request: Request,
+  ctx: WorkerExecutionContext,
+): Promise<Response> {
+  const cache = (caches as CacheStorage & { default: Cache }).default;
+  const cacheKey = new Request(new URL(releaseCachePath, request.url).toString(), {
+    method: "GET",
+  });
+  const cachedResponse = await cache.match(cacheKey);
+  if (cachedResponse) {
+    return cachedResponse;
+  }
+
+  const releaseResponse = await fetch(githubLatestReleaseUrl, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "pocodex-site",
+      "X-GitHub-Api-Version": "2026-03-10",
+    },
+  });
+
+  if (!releaseResponse.ok) {
+    return new Response(
+      JSON.stringify({
+        error: `GitHub release lookup failed with status ${releaseResponse.status}`,
+      }),
+      {
+        status: 502,
+        headers: {
+          "access-control-allow-origin": "*",
+          "cache-control": "no-store",
+          "content-type": "application/json; charset=UTF-8",
+        },
+      },
+    );
+  }
+
+  const release = (await releaseResponse.json()) as GitHubRelease;
+  const payload: LatestReleasePayload = {
+    htmlUrl: release.html_url,
+    name: release.name ?? normalizeVersionTag(release.tag_name),
+    notesHtml: renderReleaseNotes(release.body),
+    publishedAt: release.published_at,
+    publishedLabel: formatPublishedDate(release.published_at),
+    tagName: release.tag_name,
+    version: normalizeVersionTag(release.tag_name),
+  };
+
+  const response = new Response(JSON.stringify(payload), {
+    headers: {
+      "access-control-allow-origin": "*",
+      "cache-control": `public, max-age=${String(releaseCacheTtlSeconds)}`,
+      "content-type": "application/json; charset=UTF-8",
+    },
+  });
+  ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  return response;
+}
+
+function normalizeVersionTag(tagName: string): string {
+  return tagName.replace(/^pocodex-v/, "v");
+}
+
+function formatPublishedDate(publishedAt: string | null): string {
+  if (!publishedAt) {
+    return "recently";
+  }
+
+  return new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(new Date(publishedAt));
+}
+
+function renderReleaseNotes(markdown: string | null): string {
+  if (!markdown || markdown.trim().length === 0) {
+    return "<p>No release notes published yet.</p>";
+  }
+
+  const htmlParts: string[] = [];
+  const paragraphLines: string[] = [];
+  let isInsideList = false;
+
+  const flushParagraph = () => {
+    if (paragraphLines.length === 0) {
+      return;
+    }
+    htmlParts.push(`<p>${renderInlineMarkdown(paragraphLines.join(" "))}</p>`);
+    paragraphLines.length = 0;
+  };
+
+  const closeList = () => {
+    if (!isInsideList) {
+      return;
+    }
+    htmlParts.push("</ul>");
+    isInsideList = false;
+  };
+
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      flushParagraph();
+      closeList();
+      continue;
+    }
+
+    if (line.startsWith("### ")) {
+      flushParagraph();
+      closeList();
+      htmlParts.push(`<h4>${renderInlineMarkdown(line.slice(4))}</h4>`);
+      continue;
+    }
+
+    if (line.startsWith("## ")) {
+      flushParagraph();
+      closeList();
+      htmlParts.push(`<h3>${renderInlineMarkdown(line.slice(3))}</h3>`);
+      continue;
+    }
+
+    if (line.startsWith("* ") || line.startsWith("- ")) {
+      flushParagraph();
+      if (!isInsideList) {
+        htmlParts.push("<ul>");
+        isInsideList = true;
+      }
+      htmlParts.push(`<li>${renderInlineMarkdown(line.slice(2))}</li>`);
+      continue;
+    }
+
+    closeList();
+    paragraphLines.push(line);
+  }
+
+  flushParagraph();
+  closeList();
+
+  return htmlParts.join("");
+}
+
+function renderInlineMarkdown(text: string): string {
+  const links: string[] = [];
+  const linkPlaceholderPrefix = "__POCODEX_LINK_";
+
+  const textWithPlaceholders = text.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_match, label: string, url: string) => {
+      const placeholder = `${linkPlaceholderPrefix}${String(links.length)}__`;
+      links.push(`<a href="${escapeHtmlAttribute(url)}" rel="noreferrer">${escapeHtml(label)}</a>`);
+      return placeholder;
+    },
+  );
+
+  let html = escapeHtml(textWithPlaceholders);
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+
+  links.forEach((link, index) => {
+    html = html.replace(`${linkPlaceholderPrefix}${String(index)}__`, link);
+  });
+
+  return html;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value);
+}

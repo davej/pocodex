@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/davej/pocodex/compare/pocodex-v0.3.0...pocodex-v0.4.0) (2026-04-07)
+
+### Features
+
+- **browser:** add workspace root picker and import flow ([0303724](https://github.com/davej/pocodex/commit/03037241e8702c62e9165c69f3306f4bafecb697))
+- **distribution:** add tray app and landing site ([1d1c381](https://github.com/davej/pocodex/commit/1d1c381645c11abd7937adabb021f2da57967496))
+- **runtime:** extract reusable pocodex runtime ([3db298d](https://github.com/davej/pocodex/commit/3db298d9d7c210daded06b1e015005ca2d6a2bf6))
+- **site:** add favicon ([44094b3](https://github.com/davej/pocodex/commit/44094b3f6b65ee6188f8208be661bc7325724358))
+- **site:** advertise CLI install ([56c4028](https://github.com/davej/pocodex/commit/56c4028f44e592b87e3b635016a7433e0c3fd698))
+
+### Bug Fixes
+
+- **status:** load local usage data in tray builds ([a7c3510](https://github.com/davej/pocodex/commit/a7c3510630e73725c4f3d9404288e8e177c63469))
+- **tray:** persist access token and port ([cb71fce](https://github.com/davej/pocodex/commit/cb71fceff123789c012cabba68d832cc829d9390))
+- **tray:** preserve tokenized URLs in local dev ([710db42](https://github.com/davej/pocodex/commit/710db423fb4c6251f1ddc823c49e84f264f88ff5))
+
 ## [0.3.0](https://github.com/davej/pocodex/compare/pocodex-v0.2.1...pocodex-v0.3.0) (2026-03-12)
 
 ### Features

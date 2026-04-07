@@ -14,42 +14,42 @@ const pocodexEntryPath = join(pocodexDistDirectory, "index.js");
 const pocodexStylesheetPath = join(pocodexDistDirectory, "pocodex.css");
 const pocodexStaticImagePath = join(pocodexDistDirectory, "images", "import.svg");
 const pocodexTsconfigPath = join(pocodexDirectory, "tsconfig.json");
-
-if (
+const hasPrebuiltDist =
   existsSync(pocodexEntryPath) &&
   existsSync(pocodexStylesheetPath) &&
-  existsSync(pocodexStaticImagePath)
-) {
+  existsSync(pocodexStaticImagePath);
+const hasSourceCheckout = existsSync(pocodexTsconfigPath);
+
+if (!hasSourceCheckout && hasPrebuiltDist) {
   process.exit(0);
 }
 
-if (!existsSync(pocodexTsconfigPath)) {
+if (!hasSourceCheckout) {
   throw new Error(
     `Missing bundled Pocodex build output at ${pocodexEntryPath} and no source checkout at ${pocodexTsconfigPath}.`,
   );
 }
 
-await runCommand(process.platform === "win32" ? "pnpm.cmd" : "pnpm", [
-  "exec",
-  "tsgo",
-  "-p",
-  pocodexTsconfigPath,
-]);
+await runCommand(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["run", "build"], {
+  cwd: pocodexDirectory,
+});
 
-mkdirSync(join(pocodexDistDirectory, "images"), { recursive: true });
-copyFileSync(
-  join(pocodexDirectory, "src", "pocodex.css"),
-  join(pocodexDistDirectory, "pocodex.css"),
-);
-copyFileSync(
-  join(pocodexDirectory, "src", "images", "import.svg"),
-  join(pocodexDistDirectory, "images", "import.svg"),
-);
+if (!hasPrebuiltDist) {
+  mkdirSync(join(pocodexDistDirectory, "images"), { recursive: true });
+  copyFileSync(
+    join(pocodexDirectory, "src", "pocodex.css"),
+    join(pocodexDistDirectory, "pocodex.css"),
+  );
+  copyFileSync(
+    join(pocodexDirectory, "src", "images", "import.svg"),
+    join(pocodexDistDirectory, "images", "import.svg"),
+  );
+}
 
-function runCommand(command, args) {
+function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd: trayDirectory,
+      cwd: options.cwd ?? trayDirectory,
       env: process.env,
       stdio: "inherit",
     });

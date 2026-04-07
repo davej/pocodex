@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -565,6 +565,123 @@ describeAppServerBridge(({ children }) => {
     }
   });
 
+  it("loads usage data from codex home when local rate limits are unavailable", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    await writeCodexUsageFixture(codexHome, {
+      authPlanType: "pro",
+      sessionRateLimits: {
+        limit_id: "codex",
+        limit_name: null,
+        primary: {
+          used_percent: 2,
+          window_minutes: 300,
+          resets_at: 1_775_505_697,
+        },
+        secondary: {
+          used_percent: 13,
+          window_minutes: 10_080,
+          resets_at: 1_775_638_942,
+        },
+        credits: null,
+        plan_type: "pro",
+      },
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+    mockLocalRequestErrors.set("account/rateLimits/read", "rate limits unavailable");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage-codex-home",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await waitForCondition(() =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-wham-usage-codex-home")),
+      );
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage-codex-home")).toEqual({
+        credits: null,
+        plan_type: "pro",
+        rate_limit_name: null,
+        rate_limit: {
+          allowed: true,
+          limit_reached: false,
+          primary_window: {
+            used_percent: 2,
+            limit_window_seconds: 18_000,
+            reset_at: 1_775_505_697,
+          },
+          secondary_window: {
+            used_percent: 13,
+            limit_window_seconds: 604_800,
+            reset_at: 1_775_638_942,
+          },
+        },
+        additional_rate_limits: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
+  it("falls back to auth metadata when no session usage snapshot exists", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    process.env.CODEX_HOME = codexHome;
+    await writeCodexUsageFixture(codexHome, {
+      authPlanType: "pro",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("Unexpected remote fetch");
+    });
+    mockLocalRequestErrors.set("account/rateLimits/read", "rate limits unavailable");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    try {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: "fetch-wham-usage-auth-fallback",
+        method: "GET",
+        url: "/wham/usage",
+      });
+
+      await waitForCondition(() =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-wham-usage-auth-fallback")),
+      );
+
+      expect(getFetchJsonBody(emittedMessages, "fetch-wham-usage-auth-fallback")).toEqual({
+        credits: null,
+        plan_type: "pro",
+        rate_limit_name: null,
+        rate_limit: null,
+        additional_rate_limits: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      await bridge.close();
+    }
+  });
+
   it("reads account info from the local app server and filters unsupported plans", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
@@ -721,3 +838,55 @@ describeAppServerBridge(({ children }) => {
     }
   });
 });
+
+async function writeCodexUsageFixture(
+  codexHome: string,
+  options: {
+    authPlanType?: string;
+    sessionRateLimits?: Record<string, unknown>;
+  } = {},
+): Promise<void> {
+  const { authPlanType, sessionRateLimits } = options;
+
+  if (authPlanType) {
+    const payload = Buffer.from(
+      JSON.stringify({
+        "https://api.openai.com/auth": {
+          chatgpt_plan_type: authPlanType,
+        },
+      }),
+      "utf8",
+    ).toString("base64url");
+
+    await writeFile(
+      join(codexHome, "auth.json"),
+      `${JSON.stringify(
+        {
+          tokens: {
+            access_token: `header.${payload}.signature`,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
+
+  if (sessionRateLimits) {
+    const sessionDirectory = join(codexHome, "sessions", "2026", "04", "06");
+    await mkdir(sessionDirectory, { recursive: true });
+    await writeFile(
+      join(sessionDirectory, "rollout-2026-04-06T16-00-59-fixture.jsonl"),
+      `${JSON.stringify({
+        timestamp: "2026-04-06T15:18:23.758Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: sessionRateLimits,
+        },
+      })}\n`,
+      "utf8",
+    );
+  }
+}
