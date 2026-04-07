@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import { chooseCodexAppPath } from "../apps/tray/src/app-path.js";
 import {
   applySelectedCodexAppPath,
+  buildRuntimeOptions,
+  ensureTrayConfigHasToken,
   getDefaultTrayConfig,
   loadTrayConfig,
   planLanAccessChange,
@@ -23,6 +25,7 @@ describe("tray config helpers", () => {
     const savedConfig = {
       ...getDefaultTrayConfig(),
       appPath: "/Applications/Codex Beta.app",
+      listenPort: 4321,
       listenMode: "lan" as const,
       token: "secret",
     };
@@ -30,6 +33,7 @@ describe("tray config helpers", () => {
 
     await expect(loadTrayConfig(configPath)).resolves.toEqual(savedConfig);
     await expect(readFile(configPath, "utf8")).resolves.toContain('"listenMode": "lan"');
+    await expect(readFile(configPath, "utf8")).resolves.toContain('"listenPort": 4321');
   });
 
   it("generates a token for LAN mode changes and marks running runtimes for restart", () => {
@@ -75,6 +79,17 @@ describe("tray config helpers", () => {
     expect(applySelectedCodexAppPath(config, selectedPath)).toEqual({
       ...config,
       appPath: "/Applications/Codex Beta.app",
+    });
+  });
+
+  it("ensures a stable token and carries it into loopback runtime options", () => {
+    const configWithToken = ensureTrayConfigHasToken(getDefaultTrayConfig());
+
+    expect(configWithToken.token).toMatch(/^[a-f0-9]{32}$/);
+    expect(buildRuntimeOptions(configWithToken)).toMatchObject({
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+      token: configWithToken.token,
     });
   });
 });

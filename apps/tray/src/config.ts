@@ -14,7 +14,7 @@ export interface TrayConfig {
   appPath: string;
   autoStart: true;
   listenMode: TrayListenMode;
-  listenPort: 0;
+  listenPort: number;
   token: string;
 }
 
@@ -62,8 +62,8 @@ export function normalizeTrayConfig(value: unknown): TrayConfig {
         : defaults.appPath,
     autoStart: true,
     listenMode: value.listenMode === "lan" ? "lan" : "loopback",
-    listenPort: 0,
-    token: typeof value.token === "string" ? value.token : defaults.token,
+    listenPort: normalizeListenPort(value.listenPort, defaults.listenPort),
+    token: typeof value.token === "string" ? value.token.trim() : defaults.token,
   };
 }
 
@@ -74,7 +74,18 @@ export function buildRuntimeOptions(config: TrayConfig): PocodexRuntimeOptions {
     devMode: false,
     listenHost: config.listenMode === "lan" ? "0.0.0.0" : "127.0.0.1",
     listenPort: config.listenPort,
-    token: config.listenMode === "lan" ? config.token : "",
+    token: config.token,
+  };
+}
+
+export function ensureTrayConfigHasToken(config: TrayConfig): TrayConfig {
+  if (config.token.length > 0) {
+    return config;
+  }
+
+  return {
+    ...config,
+    token: generateTrayToken(),
   };
 }
 
@@ -128,6 +139,16 @@ export function generateTrayToken(): string {
 
 function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function normalizeListenPort(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    return fallback;
+  }
+  if (value < 0 || value > 65535) {
+    return fallback;
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

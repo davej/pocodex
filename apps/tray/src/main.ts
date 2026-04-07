@@ -26,6 +26,7 @@ import { shouldInitTodesktopRuntime } from "./todesktop-runtime.js";
 import {
   applySelectedCodexAppPath,
   buildRuntimeOptions,
+  ensureTrayConfigHasToken,
   generateTrayToken,
   getDefaultTrayConfig,
   loadTrayConfig,
@@ -117,7 +118,7 @@ async function bootstrap(): Promise<void> {
 
   configPath = join(app.getPath("userData"), "config.json");
   logStartup(`config path: ${configPath}`);
-  config = await loadTrayConfig(configPath);
+  config = ensureTrayConfigHasToken(await loadTrayConfig(configPath));
   await saveTrayConfig(configPath, config);
   logStartup(`config loaded; autoStart=${String(config.autoStart)}`);
 
@@ -151,6 +152,7 @@ async function replaceRuntime(shouldStart: boolean): Promise<void> {
   snapshot = runtime.getSnapshot();
   runtimeSnapshotListener = (nextSnapshot) => {
     snapshot = nextSnapshot;
+    persistRuntimeListenPort(nextSnapshot);
     logStartup(`snapshot: ${snapshot.state}`);
     rebuildMenu();
   };
@@ -207,7 +209,7 @@ function rebuildMenu(): void {
     quit: () => {
       void quitApp();
     },
-    regenerateLanToken: () => {
+    regenerateAccessToken: () => {
       void updateConfig({
         ...config,
         token: generateTrayToken(),
@@ -295,6 +297,24 @@ function buildTooltip(currentSnapshot: PocodexSnapshot): string {
     lines.push(currentSnapshot.lastError);
   }
   return lines.join("\n");
+}
+
+function persistRuntimeListenPort(nextSnapshot: PocodexSnapshot): void {
+  if (nextSnapshot.state !== "running") {
+    return;
+  }
+  if (!Number.isInteger(nextSnapshot.listenPort) || nextSnapshot.listenPort <= 0) {
+    return;
+  }
+  if (config.listenPort === nextSnapshot.listenPort) {
+    return;
+  }
+
+  config = {
+    ...config,
+    listenPort: nextSnapshot.listenPort,
+  };
+  void saveTrayConfig(configPath, config).catch(() => undefined);
 }
 
 function createTrayIcon() {

@@ -12,7 +12,7 @@ describe("buildTrayMenuTemplate", () => {
     copyLocalUrl: () => {},
     openPocodex: () => {},
     quit: () => {},
-    regenerateLanToken: () => {},
+    regenerateAccessToken: () => {},
     resetCodexAppPath: () => {},
     restartPocodex: () => {},
     revealConfigFile: () => {},
@@ -42,6 +42,7 @@ describe("buildTrayMenuTemplate", () => {
     expect(readLabels(template)).toContain("Status: running");
     expect(readLabels(template)).toContain("LAN URL: http://192.168.1.24:4321/");
     expect(readLabels(template)).toContain("Copy LAN URL");
+    expect(readLabels(template)).toContain("Regenerate Access Token");
     expect(readLabels(template)).toContain("Stop Pocodex");
     expect(readLabels(template)).not.toContain("Start Pocodex");
   });
