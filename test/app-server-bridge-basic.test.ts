@@ -89,6 +89,22 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("passes the resolved codex home through to the spawned app-server", async () => {
+    const codexHomePath = join(tmpdir(), "pocodex-custom-codex-home");
+    const bridge = await createBridge(children, {
+      codexHomePath,
+    });
+    const { spawn } = await import("node:child_process");
+
+    expect(vi.mocked(spawn).mock.calls.at(0)?.[2]).toMatchObject({
+      env: expect.objectContaining({
+        CODEX_HOME: codexHomePath,
+      }),
+    });
+
+    await bridge.close();
+  });
+
   it("converts plugin list artwork paths into data URLs", async () => {
     const pluginRoot = await mkdtemp(join(tmpdir(), "pocodex-plugin-root-"));
     tempDirs.push(pluginRoot);

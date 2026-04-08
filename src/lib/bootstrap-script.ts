@@ -80,6 +80,15 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     entries: WorkspaceRootBrowserEntry[];
   };
 
+  type RestorableTerminalAttachment = {
+    sessionId: string;
+    conversationId: string | null;
+    cwd: string | null;
+    cols: number | null;
+    rows: number | null;
+    forceCwdSync: boolean;
+  };
+
   type SessionValidationResult =
     | { ok: true }
     | { ok: false; reason: "unauthorized" | "unavailable" };
@@ -136,6 +145,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   ]);
 
   const workerSubscribers = new Map<string, Set<WorkerMessageListener>>();
+  const restorableTerminalAttachments = new Map<string, RestorableTerminalAttachment>();
   const pendingMessages: string[] = [];
   const toastHost = document.createElement("div");
   const statusHost = document.createElement("div");
@@ -2314,6 +2324,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     rememberDispatchedEnterBehavior(overriddenMessage);
     syncSidebarModeWithBridgeMessage(overriddenMessage);
     syncThreadQueryWithBridgeMessage(overriddenMessage);
+    syncRestorableTerminalAttachments(overriddenMessage, "incoming");
     return overriddenMessage;
   }
 
@@ -2638,6 +2649,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return trimmedValue.length > 0 ? trimmedValue : null;
   }
 
+  function readPositiveInteger(value: unknown): number | null {
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+      return null;
+    }
+
+    return value;
+  }
+
   function normalizeRestorableConversationId(value: unknown): string | null {
     const conversationId = readNonEmptyString(value);
     if (!conversationId || conversationId.startsWith("home:")) {
@@ -2706,6 +2725,143 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
+  function syncRestorableTerminalAttachments(
+    message: unknown,
+    direction: "incoming" | "outgoing",
+  ): void {
+    if (!isRecord(message) || typeof message.type !== "string") {
+      return;
+    }
+
+    switch (message.type) {
+      case "terminal-create":
+      case "terminal-attach":
+        if (direction === "outgoing") {
+          rememberRestorableTerminalAttachment(message);
+        }
+        return;
+      case "terminal-resize":
+        if (direction === "outgoing") {
+          rememberRestorableTerminalResize(message);
+        }
+        return;
+      case "terminal-close":
+        if (direction === "outgoing") {
+          forgetRestorableTerminalAttachment(message);
+        }
+        return;
+      case "terminal-attached":
+        if (direction === "incoming") {
+          rememberRestorableTerminalCwd(message);
+        }
+        return;
+      case "terminal-exit":
+        if (direction === "incoming") {
+          forgetRestorableTerminalAttachment(message);
+        }
+        return;
+      default:
+        return;
+    }
+  }
+
+  function rememberRestorableTerminalAttachment(message: Record<string, unknown>): void {
+    const sessionId = readNonEmptyString(message.sessionId);
+    if (!sessionId) {
+      return;
+    }
+
+    const existing = restorableTerminalAttachments.get(sessionId);
+    restorableTerminalAttachments.set(sessionId, {
+      sessionId,
+      conversationId:
+        readNonEmptyString(message.conversationId) ?? existing?.conversationId ?? null,
+      cwd: readNonEmptyString(message.cwd) ?? existing?.cwd ?? null,
+      cols: readPositiveInteger(message.cols) ?? existing?.cols ?? null,
+      rows: readPositiveInteger(message.rows) ?? existing?.rows ?? null,
+      forceCwdSync: message.forceCwdSync === true || existing?.forceCwdSync === true,
+    });
+  }
+
+  function rememberRestorableTerminalResize(message: Record<string, unknown>): void {
+    const sessionId = readNonEmptyString(message.sessionId);
+    if (!sessionId) {
+      return;
+    }
+
+    const existing = restorableTerminalAttachments.get(sessionId);
+    if (!existing) {
+      return;
+    }
+
+    const cols = readPositiveInteger(message.cols);
+    const rows = readPositiveInteger(message.rows);
+    if (cols === null || rows === null) {
+      return;
+    }
+
+    restorableTerminalAttachments.set(sessionId, {
+      ...existing,
+      cols,
+      rows,
+    });
+  }
+
+  function rememberRestorableTerminalCwd(message: Record<string, unknown>): void {
+    const sessionId = readNonEmptyString(message.sessionId);
+    if (!sessionId) {
+      return;
+    }
+
+    const existing = restorableTerminalAttachments.get(sessionId);
+    const cwd = readNonEmptyString(message.cwd);
+    if (!existing || !cwd) {
+      return;
+    }
+
+    restorableTerminalAttachments.set(sessionId, {
+      ...existing,
+      cwd,
+    });
+  }
+
+  function forgetRestorableTerminalAttachment(message: Record<string, unknown>): void {
+    const sessionId = readNonEmptyString(message.sessionId);
+    if (sessionId) {
+      restorableTerminalAttachments.delete(sessionId);
+    }
+  }
+
+  function replayRestorableTerminalAttachments(): void {
+    for (const attachment of restorableTerminalAttachments.values()) {
+      const message: Record<string, unknown> = {
+        type: "terminal-attach",
+        sessionId: attachment.sessionId,
+      };
+
+      if (attachment.conversationId) {
+        message.conversationId = attachment.conversationId;
+      }
+      if (attachment.cwd) {
+        message.cwd = attachment.cwd;
+      }
+      if (attachment.cols !== null) {
+        message.cols = attachment.cols;
+      }
+      if (attachment.rows !== null) {
+        message.rows = attachment.rows;
+      }
+      if (attachment.forceCwdSync) {
+        message.forceCwdSync = true;
+      }
+
+      sendEnvelope({
+        type: "bridge_message",
+        message,
+      });
+    }
+  }
+
   function scheduleInitialThreadRestoreFromUrl(): void {
     if (hasScheduledInitialThreadRestore) {
       return;
@@ -2751,6 +2907,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       },
     });
     scheduleThreadRestoreFromUrl();
+    replayRestorableTerminalAttachments();
   }
 
   function getStoredToken(): string {
@@ -3353,6 +3510,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         });
         return;
       }
+      syncRestorableTerminalAttachments(message, "outgoing");
       sendEnvelope({ type: "bridge_message", message });
       syncThreadQueryWithBridgeMessage(message);
       if (isRecord(message) && message.type === "ready") {

@@ -70,7 +70,7 @@ const execFileAsync = promisify(execFile);
 
 export async function loadCodexBundle(appPath: string): Promise<CodexBundle> {
   const metadata = await loadCodexDesktopMetadata(appPath);
-  const webviewRoot = await ensureWebviewCache(metadata.appAsarPath, metadata.version);
+  const webviewRoot = await ensureWebviewCache(metadata);
   const faviconHref = await resolveWebviewFaviconHref(webviewRoot);
 
   return {
@@ -137,7 +137,7 @@ export async function ensureCodexCliBinary(appPath: string): Promise<string> {
     return metadata.cliBinaryPath;
   }
 
-  const cliDirectory = join(cacheRootForVersion(metadata.version), "__cli", metadata.layout);
+  const cliDirectory = join(cacheRootForBuild(metadata), "__cli", metadata.layout);
   const markerPath = join(cliDirectory, ".complete");
   const cliFilename = basename(metadata.cliBinaryPath);
   const cachedCliPath = join(cliDirectory, cliFilename);
@@ -176,19 +176,19 @@ export async function ensureCodexDesktopWorkerScript(
   appPath: string,
 ): Promise<CodexDesktopWorkerScript> {
   const metadata = await loadCodexDesktopMetadata(appPath);
-  const workerPath = await ensureDesktopWorkerCache(metadata.appAsarPath, metadata.version);
+  const workerPath = await ensureDesktopWorkerCache(metadata);
   return {
     metadata,
     workerPath,
   };
 }
 
-async function ensureWebviewCache(appAsarPath: string, version: string): Promise<string> {
-  const versionCacheRoot = cacheRootForVersion(version);
-  const webviewDirectory = join(versionCacheRoot, "__webview");
+async function ensureWebviewCache(metadata: CodexDesktopMetadata): Promise<string> {
+  const buildCacheRoot = cacheRootForBuild(metadata);
+  const webviewDirectory = join(buildCacheRoot, "__webview");
   const markerPath = join(webviewDirectory, ".complete");
-  const legacyMarkerPath = join(versionCacheRoot, ".complete");
-  const legacyIndexPath = join(versionCacheRoot, "index.html");
+  const legacyMarkerPath = join(buildCacheRoot, ".complete");
+  const legacyIndexPath = join(buildCacheRoot, "index.html");
 
   try {
     await stat(markerPath);
@@ -200,16 +200,16 @@ async function ensureWebviewCache(appAsarPath: string, version: string): Promise
   try {
     await stat(legacyMarkerPath);
     await stat(legacyIndexPath);
-    return versionCacheRoot;
+    return buildCacheRoot;
   } catch {
     // continue and build the cache
   }
 
-  await mkdir(versionCacheRoot, { recursive: true });
-  const tempDirectory = await mkdtemp(join(versionCacheRoot, "webview-"));
+  await mkdir(buildCacheRoot, { recursive: true });
+  const tempDirectory = await mkdtemp(join(buildCacheRoot, "webview-"));
 
   try {
-    const archiveEntries = asar.listPackage(appAsarPath, { isPack: false });
+    const archiveEntries = asar.listPackage(metadata.appAsarPath, { isPack: false });
     for (const archiveEntry of archiveEntries) {
       if (!archiveEntry.startsWith("/webview/")) {
         continue;
@@ -220,14 +220,14 @@ async function ensureWebviewCache(appAsarPath: string, version: string): Promise
         continue;
       }
 
-      const entry = asar.statFile(appAsarPath, archiveEntry.slice(1), false);
+      const entry = asar.statFile(metadata.appAsarPath, archiveEntry.slice(1), false);
       if ("files" in entry || "link" in entry) {
         continue;
       }
 
       const destinationPath = join(tempDirectory, relativePath);
       await mkdir(dirname(destinationPath), { recursive: true });
-      const buffer = asar.extractFile(appAsarPath, archiveEntry.slice(1));
+      const buffer = asar.extractFile(metadata.appAsarPath, archiveEntry.slice(1));
       await writeFile(destinationPath, buffer);
     }
 
@@ -241,8 +241,8 @@ async function ensureWebviewCache(appAsarPath: string, version: string): Promise
   return webviewDirectory;
 }
 
-async function ensureDesktopWorkerCache(appAsarPath: string, version: string): Promise<string> {
-  const cacheRoot = cacheRootForVersion(version);
+async function ensureDesktopWorkerCache(metadata: CodexDesktopMetadata): Promise<string> {
+  const cacheRoot = cacheRootForBuild(metadata);
   const workerDirectory = join(cacheRoot, "__desktop-worker");
   const markerPath = join(workerDirectory, ".complete");
   const workerPath = join(workerDirectory, "worker.js");
@@ -264,10 +264,10 @@ async function ensureDesktopWorkerCache(appAsarPath: string, version: string): P
   const tempDirectory = await mkdtemp(join(parentDirectory, "worker-"));
 
   try {
-    const buffer = asar.extractFile(appAsarPath, ".vite/build/worker.js");
+    const buffer = asar.extractFile(metadata.appAsarPath, ".vite/build/worker.js");
     await writeFile(join(tempDirectory, "worker.js"), buffer);
     await extractAsarDirectory(
-      appAsarPath,
+      metadata.appAsarPath,
       "/node_modules/tslib/",
       join(tempDirectory, "node_modules", "tslib"),
     );
@@ -297,8 +297,20 @@ async function resolveWebviewFaviconHref(webviewRoot: string): Promise<string | 
   return faviconCandidate ? `./assets/${faviconCandidate.name}` : null;
 }
 
-function cacheRootForVersion(version: string): string {
-  return join(homedir(), ".cache", "pocodex", version);
+function cacheRootForBuild(
+  metadata: Pick<CodexDesktopMetadata, "version" | "buildFlavor" | "buildNumber">,
+): string {
+  const directoryName = [
+    sanitizeCachePathComponent(metadata.version),
+    sanitizeCachePathComponent(metadata.buildFlavor),
+    sanitizeCachePathComponent(metadata.buildNumber),
+  ].join("__");
+  return join(homedir(), ".cache", "pocodex", directoryName);
+}
+
+function sanitizeCachePathComponent(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  return sanitized || "unknown";
 }
 
 function markerPathFor(directory: string): string {

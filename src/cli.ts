@@ -12,6 +12,7 @@ import { normalizeCliArgv } from "./lib/cli-args.js";
 import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
 import { renderBootstrapScript } from "./lib/bootstrap-script.js";
 import { patchIndexHtml } from "./lib/html-patcher.js";
+import { parseListenAddress } from "./lib/listen-address.js";
 import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from "./lib/pwa.js";
 import type { SentryInitOptions, ServeCommandOptions } from "./lib/protocol.js";
 import { getServeUrls } from "./lib/serve-url.js";
@@ -175,17 +176,16 @@ async function parseServeCommand(argv: string[]): Promise<ServeCommandOptions> {
   const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
 
-  const [listenHost, portText] = listen.split(":");
-  const listenPort = Number.parseInt(portText ?? "", 10);
-  if (!listenHost || !Number.isInteger(listenPort) || listenPort <= 0) {
+  const parsedListenAddress = parseListenAddress(listen);
+  if (!parsedListenAddress) {
     throw new Error(`Invalid --listen value: ${listen}`);
   }
 
   return {
     appPath,
     devMode,
-    listenHost,
-    listenPort,
+    listenHost: parsedListenAddress.listenHost,
+    listenPort: parsedListenAddress.listenPort,
     token,
   };
 }

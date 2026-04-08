@@ -338,6 +338,115 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("normalizes WSL UNC workspace roots for picker and browser flows", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
+    tempDirs.push(tempDirectory);
+    const projectRoot = join(tempDirectory, "project-alpha");
+    await mkdir(projectRoot, { recursive: true });
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+
+    const bridge = await createBridge(children);
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-wsl-picker-list",
+        method: "workspace-root-picker/list",
+        params: {
+          path: convertLinuxPathToWslUnc(tempDirectory, "wsl$"),
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-wsl-picker-list",
+      type: "response",
+      resultType: "success",
+      result: {
+        currentPath: tempDirectory,
+        parentPath: dirname(tempDirectory),
+        homePath: homedir(),
+        entries: [
+          {
+            name: "project-alpha",
+            path: projectRoot,
+          },
+        ],
+      },
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-wsl-browser-list",
+        method: "workspace-root-browser/list",
+        params: {
+          root: convertLinuxPathToWslUnc(tempDirectory, "wsl.localhost"),
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-wsl-browser-list",
+      type: "response",
+      resultType: "success",
+      result: {
+        root: tempDirectory,
+        parentRoot: dirname(tempDirectory),
+        homeDir: homedir(),
+        entries: [
+          {
+            name: "project-alpha",
+            path: projectRoot,
+          },
+        ],
+      },
+    });
+
+    await bridge.close();
+  });
+
+  it("normalizes WSL Windows-style workspace roots before validation", async () => {
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await expect(
+      bridge.handleIpcRequest({
+        requestId: "ipc-windows-picker-list",
+        method: "workspace-root-picker/list",
+        params: {
+          path: "C:\\missing\\project",
+        },
+      }),
+    ).resolves.toEqual({
+      requestId: "ipc-windows-picker-list",
+      type: "response",
+      resultType: "error",
+      error: "Choose an existing folder.",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-add-root-windows-style",
+      method: "POST",
+      url: "vscode://codex/add-workspace-root-option",
+      body: JSON.stringify({
+        root: "C:\\missing\\project",
+        setActive: false,
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-add-root-windows-style")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-add-root-windows-style")).toEqual({
+      success: false,
+      root: "/mnt/c/missing/project",
+      error: "Project path does not exist on the host filesystem.",
+    });
+
+    await bridge.close();
+  });
+
   it("creates workspace root picker directories and rejects invalid names", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-root-picker-"));
     tempDirs.push(tempDirectory);
@@ -619,3 +728,12 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 });
+
+function convertLinuxPathToWslUnc(
+  linuxPath: string,
+  host: "wsl$" | "wsl.localhost" = "wsl$",
+): string {
+  const normalizedPath = linuxPath.replace(/^\/+/, "");
+  const segments = normalizedPath.length > 0 ? normalizedPath.split("/") : [];
+  return `\\\\${host}\\Ubuntu${segments.length > 0 ? `\\${segments.join("\\")}` : ""}`;
+}

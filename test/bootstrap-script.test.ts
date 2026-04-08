@@ -3393,6 +3393,70 @@ describe("renderBootstrapScript", () => {
     });
   });
 
+  it("replays live terminal attachments after a websocket reconnect", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret",
+    });
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const firstSocket = TestWebSocket.latest;
+    expect(firstSocket).toBeTruthy();
+
+    harness.openSocket();
+    await flushBootstrapMicrotasks();
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "terminal-attach",
+      sessionId: "term-1",
+      conversationId: "conv-1",
+      cwd: "/tmp/project",
+      cols: 80,
+      rows: 24,
+    });
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "terminal-resize",
+      sessionId: "term-1",
+      cols: 132,
+      rows: 40,
+    });
+
+    firstSocket?.emit("close", {
+      code: 4000,
+      reason: "heartbeat-timeout",
+    });
+    drainTestTimers(harness.timers);
+    await flushBootstrapMicrotasks();
+
+    const secondSocket = TestWebSocket.latest;
+    expect(secondSocket).not.toBe(firstSocket);
+
+    harness.openSocket();
+    await flushBootstrapMicrotasks();
+
+    expect(harness.getSentEnvelopes()).toContainEqual({
+      type: "bridge_message",
+      message: {
+        type: "terminal-attach",
+        sessionId: "term-1",
+        conversationId: "conv-1",
+        cwd: "/tmp/project",
+        cols: 132,
+        rows: 40,
+      },
+    });
+  });
+
   it("does not dispatch thread restore messages without a thread query param", async () => {
     const script = renderBootstrapScript({
       sentryOptions: {

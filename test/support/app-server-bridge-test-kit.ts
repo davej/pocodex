@@ -26,6 +26,8 @@ export const tempDirs: string[] = [];
 export const mockPtys: MockPty[] = [];
 const originalCodexHome = process.env.CODEX_HOME;
 const originalShell = process.env.SHELL;
+const originalWslDistroName = process.env.WSL_DISTRO_NAME;
+const originalWslInterop = process.env.WSL_INTEROP;
 export const TEST_WORKSPACE_ROOT = process.cwd();
 export const TEST_PROJECT_ALPHA_ROOT = join(TEST_WORKSPACE_ROOT, "..", "project-alpha");
 export const TEST_PROJECT_BETA_ROOT = join(TEST_WORKSPACE_ROOT, "..", "project-beta");
@@ -227,6 +229,16 @@ export function describeAppServerBridge(
       } else {
         process.env.CODEX_HOME = originalCodexHome;
       }
+      if (originalWslDistroName === undefined) {
+        delete process.env.WSL_DISTRO_NAME;
+      } else {
+        process.env.WSL_DISTRO_NAME = originalWslDistroName;
+      }
+      if (originalWslInterop === undefined) {
+        delete process.env.WSL_INTEROP;
+      } else {
+        process.env.WSL_INTEROP = originalWslInterop;
+      }
       process.env.SHELL = originalShell;
       vi.clearAllMocks();
     });
@@ -238,6 +250,7 @@ export function describeAppServerBridge(
 export async function createBridge(
   children: MockChildProcess[],
   options: {
+    codexHomePath?: string;
     persistedAtomRegistryPath?: string;
     workspaceRootRegistryPath?: string;
     gitWorkerBridge?: FakeGitWorkerBridge;
@@ -267,6 +280,7 @@ export async function createBridge(
     appPath: "/Applications/Codex.app",
     codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
+    codexHomePath: options.codexHomePath,
     persistedAtomRegistryPath: options.persistedAtomRegistryPath,
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,

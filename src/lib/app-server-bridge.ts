@@ -347,6 +347,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       throw new Error("Resolved Codex CLI path is required before starting the app-server bridge.");
     }
     this.child = spawn(codexCliPath, ["app-server", "--listen", "stdio://"], {
+      env: {
+        ...process.env,
+        CODEX_HOME: this.codexHomePath,
+      },
       stdio: "pipe",
     });
 
@@ -982,7 +986,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const homeDir = homedir();
     const requestedRoot =
       isJsonRecord(params) && typeof params.root === "string" ? params.root.trim() : "";
-    const root = resolve(requestedRoot || homeDir);
+    const root = this.normalizeWorkspaceRootPickerPath(requestedRoot || null, true);
     const rootValidationError = await this.getWorkspaceRootValidationError(root);
     if (rootValidationError) {
       throw new Error(rootValidationError);
@@ -2668,7 +2672,16 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       };
     }
 
-    const normalizedRoot = resolve(root);
+    let normalizedRoot: string;
+    try {
+      normalizedRoot = this.normalizeWorkspaceRootPickerPath(root, false);
+    } catch (error) {
+      return {
+        success: false,
+        root,
+        error: normalizeError(error).message,
+      };
+    }
     const validationError = await this.getWorkspaceRootValidationError(normalizedRoot);
     if (validationError) {
       return {
@@ -2909,7 +2922,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const trimmedPath = candidate?.trim() ?? "";
     const path =
       trimmedPath.length > 0
-        ? expandWorkspaceRootPickerHome(trimmedPath)
+        ? normalizeWorkspaceRootHostPath(expandWorkspaceRootPickerHome(trimmedPath))
         : fallbackToHome
           ? homedir()
           : "";
@@ -4122,6 +4135,67 @@ function expandWorkspaceRootPickerHome(path: string): string {
   }
 
   return path;
+}
+
+function normalizeWorkspaceRootHostPath(path: string): string {
+  const normalizedWslUncPath = convertWorkspaceRootWslUncPathToLinux(path);
+  if (normalizedWslUncPath) {
+    return normalizedWslUncPath;
+  }
+
+  return convertWorkspaceRootWindowsPathToWsl(path);
+}
+
+function convertWorkspaceRootWindowsPathToWsl(path: string): string {
+  if (!isRunningInWsl()) {
+    return path;
+  }
+
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(path);
+  if (!match) {
+    return path;
+  }
+
+  const driveLetter = match[1].toLowerCase();
+  const relativePath = match[2].replaceAll("\\", "/");
+  return `/mnt/${driveLetter}/${relativePath}`;
+}
+
+function convertWorkspaceRootWslUncPathToLinux(path: string): string | null {
+  if (!isRunningInWsl()) {
+    return null;
+  }
+
+  const lowerCasePath = path.toLowerCase();
+  let prefixLength = 0;
+  if (lowerCasePath.startsWith("\\\\wsl$\\")) {
+    prefixLength = "\\\\wsl$\\".length;
+  } else if (lowerCasePath.startsWith("\\\\wsl.localhost\\")) {
+    prefixLength = "\\\\wsl.localhost\\".length;
+  } else {
+    return null;
+  }
+
+  const segments = path
+    .slice(prefixLength)
+    .split("\\")
+    .filter((segment) => segment.length > 0);
+  const distroName = segments.shift();
+  const currentDistroName = process.env.WSL_DISTRO_NAME?.trim().toLowerCase();
+  if (!distroName) {
+    return null;
+  }
+  if (currentDistroName && distroName.toLowerCase() !== currentDistroName) {
+    return null;
+  }
+
+  return `/${segments.join("/")}`;
+}
+
+function isRunningInWsl(): boolean {
+  return (
+    process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
+  );
 }
 
 function normalizeWorkspaceRootPickerPathError(error: unknown): Error {

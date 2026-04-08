@@ -21,20 +21,27 @@ import {
 
 describe("codex-bundle", () => {
   const tempDirs: string[] = [];
+  const desktopPackagesByAppAsarPath = new Map<
+    string,
+    {
+      version?: string;
+      codexBuildFlavor?: string;
+      codexBuildNumber?: string;
+    }
+  >();
   const originalHome = process.env.HOME;
   const originalPocodexAppPath = process.env.POCODEX_APP_PATH;
 
   beforeEach(() => {
-    asarMock.extractFile.mockImplementation((_appAsarPath, filename) => {
+    desktopPackagesByAppAsarPath.clear();
+    asarMock.extractFile.mockImplementation((appAsarPath, filename) => {
       if (filename === "package.json") {
-        return Buffer.from(
-          JSON.stringify({
-            version: "26.313.5234.0",
-            codexBuildFlavor: "prod",
-            codexBuildNumber: "5234",
-          }),
-          "utf8",
-        );
+        const packageJson = desktopPackagesByAppAsarPath.get(appAsarPath) ?? {
+          version: "26.313.5234.0",
+          codexBuildFlavor: "prod",
+          codexBuildNumber: "5234",
+        };
+        return Buffer.from(JSON.stringify(packageJson), "utf8");
       }
 
       throw new Error(`Unexpected asar extract for ${filename}`);
@@ -96,7 +103,7 @@ describe("codex-bundle", () => {
     process.env.HOME = homeDirectory;
 
     const appPath = await createWindowsInstallLayout();
-    const versionCacheRoot = join(homeDirectory, ".cache", "pocodex", "26.313.5234.0");
+    const versionCacheRoot = join(homeDirectory, ".cache", "pocodex", "26.313.5234.0__prod__5234");
     await mkdir(join(versionCacheRoot, "__cli", "windows-app"), { recursive: true });
     await writeFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "cached", "utf8");
 
@@ -133,6 +140,38 @@ describe("codex-bundle", () => {
     ).resolves.toBe("cached");
   });
 
+  it("separates cached artifacts for builds that share a version string", async () => {
+    const homeDirectory = await mkdtemp(join(tmpdir(), "pocodex-home-"));
+    tempDirs.push(homeDirectory);
+    process.env.HOME = homeDirectory;
+
+    const firstAppPath = await createWindowsInstallLayout({
+      cliContents: "#!/bin/sh\nexit 10\n",
+      packageJson: {
+        version: "26.313.5234.0",
+        codexBuildFlavor: "prod",
+        codexBuildNumber: "5234",
+      },
+    });
+    const secondAppPath = await createWindowsInstallLayout({
+      cliContents: "#!/bin/sh\nexit 20\n",
+      packageJson: {
+        version: "26.313.5234.0",
+        codexBuildFlavor: "prod",
+        codexBuildNumber: "5235",
+      },
+    });
+    await chmod(join(firstAppPath, "resources", "codex"), 0o644);
+    await chmod(join(secondAppPath, "resources", "codex"), 0o644);
+
+    const firstStagedCliPath = await ensureCodexCliBinary(firstAppPath);
+    const secondStagedCliPath = await ensureCodexCliBinary(secondAppPath);
+
+    expect(firstStagedCliPath).not.toBe(secondStagedCliPath);
+    await expect(readFile(firstStagedCliPath, "utf8")).resolves.toBe("#!/bin/sh\nexit 10\n");
+    await expect(readFile(secondStagedCliPath, "utf8")).resolves.toBe("#!/bin/sh\nexit 20\n");
+  });
+
   it("resolves POCODEX_APP_PATH when it points at the bundled cli", async () => {
     const appPath = await createWindowsInstallLayout();
     process.env.POCODEX_APP_PATH = join(appPath, "resources", "codex");
@@ -140,16 +179,36 @@ describe("codex-bundle", () => {
     await expect(resolveDefaultCodexAppPath()).resolves.toBe(appPath);
   });
 
-  async function createWindowsInstallLayout(): Promise<string> {
+  async function createWindowsInstallLayout(
+    options: {
+      cliContents?: string;
+      packageJson?: {
+        version?: string;
+        codexBuildFlavor?: string;
+        codexBuildNumber?: string;
+      };
+    } = {},
+  ): Promise<string> {
     const rootDirectory = await mkdtemp(join(tmpdir(), "pocodex-codex-app-"));
     tempDirs.push(rootDirectory);
 
     const appPath = join(rootDirectory, "app");
     const resourcesDirectory = join(appPath, "resources");
     await mkdir(resourcesDirectory, { recursive: true });
-    await writeFile(join(resourcesDirectory, "app.asar"), "");
-    await writeFile(join(resourcesDirectory, "codex"), "#!/bin/sh\nexit 0\n", "utf8");
+    const appAsarPath = join(resourcesDirectory, "app.asar");
+    await writeFile(appAsarPath, "");
+    await writeFile(
+      join(resourcesDirectory, "codex"),
+      options.cliContents ?? "#!/bin/sh\nexit 0\n",
+      "utf8",
+    );
     await chmod(join(resourcesDirectory, "codex"), 0o755);
+    desktopPackagesByAppAsarPath.set(appAsarPath, {
+      version: "26.313.5234.0",
+      codexBuildFlavor: "prod",
+      codexBuildNumber: "5234",
+      ...options.packageJson,
+    });
     return appPath;
   }
 });
