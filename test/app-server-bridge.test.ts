@@ -429,6 +429,32 @@ describe("AppServerBridge", () => {
     await bridge.close();
   });
 
+  it("rebroadcasts thread stream state changes back to the browser", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "thread-stream-state-changed",
+      conversationId: "conv-1",
+      patch: {
+        items: [],
+      },
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "thread-stream-state-changed",
+      conversationId: "conv-1",
+      patch: {
+        items: [],
+      },
+    });
+
+    await bridge.close();
+  });
+
   it("creates on attach, ignores early resize, and rebinds terminal sessions by conversation", async () => {
     process.env.SHELL = "/bin/zsh";
     const bridge = await createBridge(children);
@@ -1230,6 +1256,37 @@ describe("AppServerBridge", () => {
 
     expect(getFetchJsonBody(emittedMessages, "fetch-paths")).toEqual({
       existingPaths: [TEST_WORKSPACE_ROOT],
+    });
+
+    await bridge.close();
+  });
+
+  it("generates thread titles for host fetch requests", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-thread-title",
+      method: "POST",
+      url: "vscode://codex/generate-thread-title",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+          cwd: TEST_WORKSPACE_ROOT,
+          prompt:
+            "Spin up a subagent to explore [this repo](https://example.com) and report back the main entry points and key bridge files.",
+        },
+      }),
+    });
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-thread-title")));
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-thread-title")).toEqual({
+      title: "explore this repo and report back the main entry points and…",
     });
 
     await bridge.close();
