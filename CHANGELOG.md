@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/davej/pocodex/compare/pocodex-v0.4.0...pocodex-v0.4.1) (2026-04-08)
+
+
+### Bug Fixes
+
+* **app-server-bridge:** restore subagent thread updates ([d051a42](https://github.com/davej/pocodex/commit/d051a4231b7c662b3067d5fa3c469d9e1c878e3b))
+
 ## [0.4.0](https://github.com/davej/pocodex/compare/pocodex-v0.3.0...pocodex-v0.4.0) (2026-04-07)
 
 ### Features
