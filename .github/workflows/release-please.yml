@@ -32,6 +32,49 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  decorate-github-release:
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - name: Append install and download boilerplate
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          import tempfile
+
+          release_tag = os.environ["RELEASE_TAG"]
+          boilerplate = "\n--\n- Install CLI with `npm i -g pocodex`\n- Download desktop app at https://www.pocodex.app/\n"
+
+          release = json.loads(
+            subprocess.check_output(
+              ["gh", "release", "view", release_tag, "--json", "body"],
+              text=True,
+            )
+          )
+          body = release.get("body") or ""
+
+          if boilerplate.strip() in body:
+            raise SystemExit(0)
+
+          updated_body = f"{body.rstrip()}{boilerplate}"
+          with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            handle.write(updated_body)
+            notes_path = handle.name
+
+          subprocess.run(
+            ["gh", "release", "edit", release_tag, "--notes-file", notes_path],
+            check=True,
+          )
+          PY
+
   publish-npm:
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     needs: release-please

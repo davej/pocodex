@@ -131,6 +131,37 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("generates thread titles for host fetch requests", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-thread-title",
+      method: "POST",
+      url: "vscode://codex/generate-thread-title",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+          cwd: TEST_WORKSPACE_ROOT,
+          prompt:
+            "Spin up a subagent to explore [this repo](https://example.com) and report back the main entry points and key bridge files.",
+        },
+      }),
+    });
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-thread-title")));
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-thread-title")).toEqual({
+      title: "explore this repo and report back the main entry points and…",
+    });
+
+    await bridge.close();
+  });
+
   it("lists curated recommended skills from vendor imports", async () => {
     const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
     tempDirs.push(codexHome);

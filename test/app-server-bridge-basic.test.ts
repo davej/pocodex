@@ -105,6 +105,32 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("rebroadcasts thread stream state changes back to the browser", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "thread-stream-state-changed",
+      conversationId: "conv-1",
+      patch: {
+        items: [],
+      },
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "thread-stream-state-changed",
+      conversationId: "conv-1",
+      patch: {
+        items: [],
+      },
+    });
+
+    await bridge.close();
+  });
+
   it("converts plugin list artwork paths into data URLs", async () => {
     const pluginRoot = await mkdtemp(join(tmpdir(), "pocodex-plugin-root-"));
     tempDirs.push(pluginRoot);

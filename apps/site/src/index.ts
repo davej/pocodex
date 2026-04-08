@@ -4,6 +4,9 @@ const githubLatestReleaseUrl = "https://api.github.com/repos/davej/pocodex/relea
 const releaseCachePath = "/api/latest-release";
 const releaseCacheTtlSeconds = 300;
 const releasesPageUrl = "https://github.com/davej/pocodex/releases";
+const releaseNotesBoilerplate = `--
+- Install CLI with \`npm i -g pocodex\`
+- Download desktop app at https://www.pocodex.app/`;
 
 type GitHubRelease = {
   body: string | null;
@@ -530,7 +533,8 @@ function formatPublishedDate(publishedAt: string | null): string {
 }
 
 function renderReleaseNotes(markdown: string | null): string {
-  if (!markdown || markdown.trim().length === 0) {
+  const sanitizedMarkdown = stripReleaseNotesBoilerplate(markdown);
+  if (!sanitizedMarkdown || sanitizedMarkdown.trim().length === 0) {
     return "<p>No release notes published yet.</p>";
   }
 
@@ -554,7 +558,7 @@ function renderReleaseNotes(markdown: string | null): string {
     isInsideList = false;
   };
 
-  for (const rawLine of markdown.split(/\r?\n/)) {
+  for (const rawLine of sanitizedMarkdown.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line.length === 0) {
       flushParagraph();
@@ -594,6 +598,14 @@ function renderReleaseNotes(markdown: string | null): string {
   closeList();
 
   return htmlParts.join("");
+}
+
+function stripReleaseNotesBoilerplate(markdown: string | null): string | null {
+  if (!markdown) {
+    return markdown;
+  }
+
+  return markdown.replace(`\n${releaseNotesBoilerplate}`, "").trimEnd();
 }
 
 function renderInlineMarkdown(text: string): string {

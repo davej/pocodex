@@ -444,11 +444,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "navigate-to-route":
       case "navigate-back":
       case "navigate-forward":
-      case "thread-stream-state-changed":
       case "thread-archived":
       case "thread-unarchived":
       case "thread-queued-followups-changed":
       case "serverRequest/resolved":
+        return;
+      case "thread-stream-state-changed":
+        this.emitBridgeMessage(message);
         return;
       case "persisted-atom-sync-request":
         this.emit("bridge_message", {
@@ -1839,6 +1841,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
             instructions: this.readDeveloperInstructions(body),
           },
         };
+      case "generate-thread-title":
+        return {
+          status: 200,
+          body: this.generateThreadTitle(body),
+        };
       case "os-info":
         return {
           status: 200,
@@ -2526,6 +2533,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
     const params = isJsonRecord(body.params) ? body.params : body;
     return typeof params.baseInstructions === "string" ? params.baseInstructions : null;
+  }
+
+  private generateThreadTitle(body: unknown): { title: string } {
+    if (!isJsonRecord(body)) {
+      return {
+        title: "",
+      };
+    }
+
+    const params = isJsonRecord(body.params) ? body.params : body;
+    const prompt = typeof params.prompt === "string" ? params.prompt : "";
+
+    return {
+      title: summarizePromptAsThreadTitle(prompt),
+    };
   }
 
   private sanitizeMcpParams(method: string, params: unknown): unknown {
@@ -4597,6 +4619,36 @@ function uniqueStrings(values: unknown[]): string[] {
     normalized.push(trimmed);
   }
   return normalized;
+}
+
+function summarizePromptAsThreadTitle(prompt: string): string {
+  const normalized = normalizeThreadTitleText(prompt);
+  if (normalized.length === 0) {
+    return "";
+  }
+
+  const strippedPrefix = normalized.replace(
+    /^(?:please\s+)?(?:(?:spin|start|launch|create)\s+up?\s+|use\s+|have\s+)?(?:an?\s+)?subagent\s+to\s+/i,
+    "",
+  );
+  const candidate = strippedPrefix.length > 0 ? strippedPrefix : normalized;
+  return truncateThreadTitle(candidate, 60);
+}
+
+function normalizeThreadTitleText(value: string): string {
+  return value
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[`*_>#~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateThreadTitle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
