@@ -1918,7 +1918,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   async function callPocodexIpc(method: string, params?: unknown): Promise<unknown> {
-    const response = await nativeFetch("/ipc-request", {
+    const response = await nativeFetch(getIpcRequestUrl(getStoredToken()), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -3040,6 +3040,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return url.toString();
   }
 
+  function getIpcRequestUrl(token: string): string {
+    return token ? `/ipc-request?token=${encodeURIComponent(token)}` : "/ipc-request";
+  }
+
   function getSessionCheckUrl(token: string): string {
     const url = new URL(SESSION_CHECK_PATH, window.location.href);
     if (token) {
@@ -3549,7 +3553,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         init?.method ??
         (input instanceof Request ? (input as Request & { method?: string }).method : undefined) ??
         "POST";
-      return nativeFetch("/ipc-request", {
+      return nativeFetch(getIpcRequestUrl(getStoredToken()), {
         method,
         body: init?.body,
         headers: init?.headers,
