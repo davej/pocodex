@@ -693,7 +693,7 @@ describe("PocodexServer", () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);
 
-    const response = await fetch(`${url}/ipc-request`, {
+    const response = await fetch(`${url}/ipc-request?token=secret`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

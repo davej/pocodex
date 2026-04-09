@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { resolve, sep } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { Duplex } from "node:stream";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import mimeTypes from "mime-types";
 import { WebSocket, WebSocketServer } from "ws";
@@ -225,6 +225,12 @@ export class PocodexServer {
     }
 
     if (url.pathname === "/ipc-request") {
+      if (!this.isAuthorized(url.searchParams.get("token"))) {
+        response.statusCode = 401;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
       await this.handleIpcRequest(request, response);
       return;
     }
@@ -316,7 +322,15 @@ export class PocodexServer {
   }
 
   private isAuthorized(requestToken: string | null): boolean {
-    return this.options.token.length === 0 || requestToken === this.options.token;
+    if (this.options.token.length === 0) {
+      return true;
+    }
+    if (!requestToken) {
+      return false;
+    }
+    const expected = Buffer.from(this.options.token);
+    const actual = Buffer.from(requestToken);
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
 
   private async handleSocketMessage(session: BrowserSession, raw: string): Promise<void> {
