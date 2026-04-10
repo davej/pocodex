@@ -918,6 +918,18 @@ html[data-pocodex="true"] [aria-label="Open in Popout Window"] {
   display: none !important;
 }
 
+/*
+ * Recent Codex builds moved the header actions into wrappers that inherit a
+ * host-provided safe-header offset and also keep at least 0.5rem of inline-
+ * start padding. In the browser shell that can push the leading icon group far
+ * off alignment, so reset it to the browser's real safe-area inset instead.
+ */
+html[data-pocodex="true"]
+  .app-header-tint
+  > [class*="ps-[max(var(--spacing-token-safe-header-left),0.5rem)]"] {
+  padding-inline-start: env(safe-area-inset-left, 0px) !important;
+}
+
 @media (max-width: 640px), (pointer: coarse) and (max-width: 900px) {
   /* Prevent iOS Safari from zooming when text inputs receive focus. */
   html[data-pocodex="true"] textarea,

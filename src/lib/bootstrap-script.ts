@@ -126,6 +126,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
   const LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY = "pocodex-sidebar-mode";
   const SIDEBAR_INTERACTION_ARM_MS = 500;
+  const SIDEBAR_TOGGLE_FALLBACK_DELAY_MS = 100;
   const SIDEBAR_MODE_TOGGLE_SETTLE_MS = 350;
   const HEARTBEAT_STALE_AFTER_MS = 45_000;
   const HEARTBEAT_MONITOR_INTERVAL_MS = 5_000;
@@ -441,6 +442,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function installMobileSidebarThreadNavigationClose(): void {
+    document.addEventListener("touchstart", handleMobileTextEntryTouchStart, true);
     document.addEventListener("click", handleMobileSidebarThreadClick, true);
     document.addEventListener("click", handleMobileContentPaneClick, true);
   }
@@ -536,11 +538,13 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return;
     }
 
-    scheduleSidebarModeReconcile(5);
     const target = event.target instanceof Element ? event.target : null;
     if (target) {
       armSidebarModeInteractionIfToggleTrigger(target);
+      maybeDispatchMobileSidebarToggleFallback(target);
     }
+
+    scheduleSidebarModeReconcile(5);
   }
 
   function handleSidebarKeydown(event: KeyboardEvent): void {
@@ -639,6 +643,28 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
+  function handleMobileTextEntryTouchStart(event: TouchEvent): void {
+    if (!isMobileSidebarViewport() || !isMobileSidebarOpen()) {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest('nav[role="navigation"]') || !target.closest(".main-surface")) {
+      return;
+    }
+
+    const textEntry = target.closest(
+      'textarea, input, [contenteditable="true"], [contenteditable=""]',
+    );
+    if (!(textEntry instanceof Element) || !isTextEntryElement(textEntry)) {
+      return;
+    }
+
+    armSidebarModeInteraction();
+    dispatchHostMessage({ type: "toggle-sidebar" });
+    scheduleSidebarModeReconcile(5);
+  }
+
   function isMobileSidebarThreadRow(element: Element): boolean {
     if (
       element.tagName === "BUTTON" ||
@@ -722,6 +748,17 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function isMobileSidebarOpen(): boolean {
+    const sidebarShell = getSidebarShell();
+    if (
+      sidebarShell instanceof Element &&
+      typeof sidebarShell.getBoundingClientRect === "function"
+    ) {
+      const sidebarShellRect = sidebarShell.getBoundingClientRect();
+      if (sidebarShellRect.width <= 0.5) {
+        return false;
+      }
+    }
+
     const contentPane = document.querySelector(".main-surface");
     if (!(contentPane instanceof Element)) {
       return false;
@@ -753,10 +790,13 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return widthIndicatesOpen || transformIndicatesOpen;
     }
 
-    return isMobileSidebarOpenByGeometry(contentPane);
+    return isMobileSidebarOpenByGeometry(contentPane, sidebarShell);
   }
 
-  function isMobileSidebarOpenByGeometry(contentPane: Element): boolean {
+  function isMobileSidebarOpenByGeometry(
+    contentPane: Element,
+    sidebarShell?: Element | null,
+  ): boolean {
     if (typeof contentPane.getBoundingClientRect !== "function") {
       return false;
     }
@@ -771,16 +811,20 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return true;
     }
 
-    const navigation = document.querySelector('nav[role="navigation"]');
+    const resolvedSidebarShell = sidebarShell instanceof Element ? sidebarShell : getSidebarShell();
     if (
-      !(navigation instanceof Element) ||
-      typeof navigation.getBoundingClientRect !== "function"
+      !(resolvedSidebarShell instanceof Element) ||
+      typeof resolvedSidebarShell.getBoundingClientRect !== "function"
     ) {
       return false;
     }
 
-    const navigationRect = navigation.getBoundingClientRect();
-    return navigationRect.left >= -0.5 && navigationRect.right > 0.5 && navigationRect.width > 0.5;
+    const sidebarShellRect = resolvedSidebarShell.getBoundingClientRect();
+    if (sidebarShellRect.width <= 0.5) {
+      return false;
+    }
+
+    return sidebarShellRect.left < viewportWidth - 0.5 && sidebarShellRect.right > 0.5;
   }
 
   function isMobileSidebarViewport(): boolean {
@@ -788,6 +832,15 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY).matches;
     }
     return window.innerWidth <= 640;
+  }
+
+  function getSidebarShell(): Element | null {
+    const navigation = document.querySelector('nav[role="navigation"]');
+    if (!(navigation instanceof Element)) {
+      return null;
+    }
+
+    return navigation.closest("aside");
   }
 
   function startSidebarModeObserver(): void {
@@ -969,6 +1022,31 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     armSidebarModeInteraction();
+  }
+
+  function maybeDispatchMobileSidebarToggleFallback(target: Element): void {
+    if (!isMobileSidebarViewport()) {
+      return;
+    }
+
+    const nearestInteractive = target.closest('button, a, [role="button"]');
+    if (!(nearestInteractive instanceof Element) || !isSidebarToggleTrigger(nearestInteractive)) {
+      return;
+    }
+
+    const modeBeforeToggle = readSidebarMode();
+    window.setTimeout(() => {
+      if (!isMobileSidebarViewport()) {
+        return;
+      }
+
+      if (readSidebarMode() !== modeBeforeToggle) {
+        return;
+      }
+
+      dispatchHostMessage({ type: "toggle-sidebar" });
+      scheduleSidebarModeReconcile(5);
+    }, SIDEBAR_TOGGLE_FALLBACK_DELAY_MS);
   }
 
   function armSidebarModeInteraction(): void {
