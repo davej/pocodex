@@ -481,6 +481,81 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("restores pending worktrees into the shared object bridge", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-pending-worktrees-"));
+    tempDirs.push(tempDirectory);
+    const persistedAtomRegistryPath = join(tempDirectory, "persisted-atoms.json");
+    await writeFile(
+      persistedAtomRegistryPath,
+      JSON.stringify(
+        {
+          version: 1,
+          atoms: {
+            pending_worktrees: [
+              {
+                id: "local:restored-pending-worktree",
+                hostId: "local",
+                createdAt: 1,
+                phase: "worktree-ready",
+                labelEdited: false,
+                outputText: "ready\n",
+                errorMessage: null,
+                worktreeWorkspaceRoot: "/tmp/worktree-root",
+                worktreeGitRoot: "/tmp/worktree-root",
+                needsAttention: false,
+                isPinned: false,
+                label: "Restored worktree",
+                sourceWorkspaceRoot: TEST_WORKSPACE_ROOT,
+                startingState: {
+                  type: "branch",
+                  branchName: "main",
+                },
+                localEnvironmentConfigPath: null,
+                prompt: "Resume worktree\n",
+                launchMode: "start-conversation",
+                startConversationParamsInput: {
+                  input: [],
+                },
+                sourceConversationId: null,
+                sourceCollaborationMode: null,
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children, {
+      persistedAtomRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "shared-object-subscribe",
+      key: "pending_worktrees",
+    });
+
+    expect(emittedMessages).toContainEqual({
+      type: "shared-object-updated",
+      key: "pending_worktrees",
+      value: [
+        expect.objectContaining({
+          id: "local:restored-pending-worktree",
+          phase: "worktree-ready",
+          worktreeWorkspaceRoot: "/tmp/worktree-root",
+        }),
+      ],
+    });
+
+    await bridge.close();
+  });
+
   it("creates on attach, ignores early resize, and rebinds terminal sessions by conversation", async () => {
     process.env.SHELL = "/bin/zsh";
     const bridge = await createBridge(children);

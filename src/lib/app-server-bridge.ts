@@ -155,6 +155,35 @@ interface PersistedAtomUpdateMessage {
   deleted?: unknown;
 }
 
+type PendingWorktreePhase = "queued" | "creating" | "worktree-ready" | "failed";
+type PendingWorktreeLaunchMode =
+  | "create-stable-worktree"
+  | "fork-conversation"
+  | "start-conversation";
+
+interface PendingWorktreeEntry {
+  id: string;
+  hostId: string;
+  createdAt: number;
+  phase: PendingWorktreePhase;
+  labelEdited: boolean;
+  outputText: string;
+  errorMessage: string | null;
+  worktreeWorkspaceRoot: string | null;
+  worktreeGitRoot: string | null;
+  needsAttention: boolean;
+  isPinned: boolean;
+  label: string;
+  sourceWorkspaceRoot: string;
+  startingState: JsonRecord;
+  localEnvironmentConfigPath: string | null;
+  prompt: string;
+  launchMode: PendingWorktreeLaunchMode;
+  startConversationParamsInput: unknown;
+  sourceConversationId: string | null;
+  sourceCollaborationMode: string | null;
+}
+
 interface GitOriginRecord {
   dir: string;
   root: string;
@@ -283,6 +312,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   >();
   private readonly pendingMcpRequestMethods = new Map<string, string>();
   private readonly fetchRequests = new Map<string, AbortController>();
+  private readonly pendingWorktreeRequests = new Map<string, AbortController>();
   private readonly persistedAtoms = new Map<string, unknown>();
   private readonly globalState = new Map<string, unknown>();
   private readonly pinnedThreadIds = new Set<string>();
@@ -334,6 +364,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.sharedObjects.set("diff_comments", []);
     this.sharedObjects.set("diff_comments_from_model", []);
     this.sharedObjects.set("composer_prefill", null);
+    this.sharedObjects.set("pending_worktrees", []);
     this.sharedObjects.set("skills_refresh_nonce", 0);
     this.terminalManager = new TerminalSessionManager({
       cwd: this.cwd,
@@ -375,6 +406,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.connectionState = "disconnected";
     this.fetchRequests.forEach((controller) => controller.abort());
     this.fetchRequests.clear();
+    this.pendingWorktreeRequests.forEach((controller) => controller.abort());
+    this.pendingWorktreeRequests.clear();
     this.terminalManager.dispose();
     await this.gitWorkerBridge.close().catch((error) => {
       debugLog("git-worker", "failed to close desktop git worker bridge", {
@@ -501,6 +534,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "electron-rename-workspace-root-option":
         await this.handleRenameWorkspaceRootOption(message);
         return;
+      case "pending-worktree-create":
+        await this.handlePendingWorktreeCreate(message);
+        return;
+      case "pending-worktree-update-metadata":
+        this.handlePendingWorktreeUpdateMetadata(message);
+        return;
+      case "pending-worktree-retry":
+        await this.handlePendingWorktreeRetry(message);
+        return;
+      case "pending-worktree-cancel":
+        this.handlePendingWorktreeCancel(message);
+        return;
+      case "pending-worktree-dismiss":
+        this.handlePendingWorktreeDismiss(message);
+        return;
       case "mcp-request":
         await this.handleMcpRequest(message as unknown as AppServerMcpRequestEnvelope);
         return;
@@ -592,6 +640,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     method: string,
     params: unknown,
     signal?: AbortSignal,
+    onGitWorkerMessage?: (message: JsonRecord) => void,
   ): Promise<unknown> {
     const requestId = randomUUID();
 
@@ -610,7 +659,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         callback();
       };
       const onWorkerMessage = (workerName: string, message: unknown) => {
-        if (workerName !== "git" || !isJsonRecord(message) || message.type !== "worker-response") {
+        if (workerName !== "git" || !isJsonRecord(message)) {
+          return;
+        }
+
+        onGitWorkerMessage?.(message);
+
+        if (message.type !== "worker-response") {
           return;
         }
 
@@ -861,6 +916,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       for (const [key, value] of Object.entries(loaded.state)) {
         this.persistedAtoms.set(key, value);
       }
+      this.syncPendingWorktreesSharedObject();
     } catch (error) {
       debugLog("app-server", "failed to restore persisted atoms", {
         error: normalizeError(error).message,
@@ -1613,6 +1669,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       deleted: message.deleted === true,
     });
 
+    if (message.key === "pending_worktrees") {
+      this.syncPendingWorktreesSharedObject();
+    }
+
     this.queuePersistedAtomRegistryWrite();
   }
 
@@ -1630,6 +1690,258 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           });
         }
       });
+  }
+
+  private async handlePendingWorktreeCreate(message: JsonRecord): Promise<void> {
+    if (!this.isMessageForThisHost(message.hostId)) {
+      return;
+    }
+
+    const entry = parsePendingWorktreeEntryRequest(message.request, this.hostId);
+    if (!entry) {
+      return;
+    }
+
+    this.upsertPendingWorktree(entry);
+    void this.startPendingWorktreeCreation(entry.id);
+  }
+
+  private handlePendingWorktreeUpdateMetadata(message: JsonRecord): void {
+    if (!this.isMessageForThisHost(message.hostId) || typeof message.id !== "string") {
+      return;
+    }
+
+    const update = parsePendingWorktreeMetadataUpdate(message.update);
+    if (!update) {
+      return;
+    }
+
+    this.updatePendingWorktree(message.id, (entry) => {
+      switch (update.type) {
+        case "isPinned":
+          return {
+            ...entry,
+            isPinned: update.isPinned,
+          };
+        case "label":
+          return {
+            ...entry,
+            label: update.label,
+          };
+        case "labelEdited":
+          return {
+            ...entry,
+            labelEdited: update.labelEdited,
+          };
+        case "needsAttention":
+          return {
+            ...entry,
+            needsAttention: update.needsAttention,
+          };
+      }
+    });
+  }
+
+  private async handlePendingWorktreeRetry(message: JsonRecord): Promise<void> {
+    if (!this.isMessageForThisHost(message.hostId) || typeof message.id !== "string") {
+      return;
+    }
+
+    this.updatePendingWorktree(message.id, (entry) => ({
+      ...entry,
+      phase: "queued",
+      outputText: "",
+      errorMessage: null,
+      worktreeWorkspaceRoot: null,
+      worktreeGitRoot: null,
+      needsAttention: false,
+    }));
+    void this.startPendingWorktreeCreation(message.id);
+  }
+
+  private handlePendingWorktreeCancel(message: JsonRecord): void {
+    if (!this.isMessageForThisHost(message.hostId) || typeof message.id !== "string") {
+      return;
+    }
+
+    this.pendingWorktreeRequests.get(message.id)?.abort();
+    this.pendingWorktreeRequests.delete(message.id);
+    this.removePendingWorktree(message.id);
+  }
+
+  private handlePendingWorktreeDismiss(message: JsonRecord): void {
+    if (!this.isMessageForThisHost(message.hostId) || typeof message.id !== "string") {
+      return;
+    }
+
+    this.pendingWorktreeRequests.get(message.id)?.abort();
+    this.pendingWorktreeRequests.delete(message.id);
+    this.removePendingWorktree(message.id);
+  }
+
+  private async startPendingWorktreeCreation(id: string): Promise<void> {
+    const entry = this.findPendingWorktree(id);
+    if (!entry) {
+      return;
+    }
+
+    this.pendingWorktreeRequests.get(id)?.abort();
+    const controller = new AbortController();
+    this.pendingWorktreeRequests.set(id, controller);
+    this.updatePendingWorktree(id, (currentEntry) => ({
+      ...currentEntry,
+      phase: "creating",
+      outputText: "",
+      errorMessage: null,
+      worktreeWorkspaceRoot: null,
+      worktreeGitRoot: null,
+      needsAttention: false,
+    }));
+
+    try {
+      const result = (await this.sendGitWorkerRequest(
+        "create-worktree",
+        {
+          cwd: entry.sourceWorkspaceRoot,
+          startingState: entry.startingState,
+          localEnvironmentConfigPath: entry.localEnvironmentConfigPath ?? undefined,
+          streamId: entry.id,
+        },
+        controller.signal,
+        (message) => {
+          const event = readPendingWorktreeWorkerEvent(message, entry.id);
+          if (!event) {
+            return;
+          }
+
+          if (event.type === "path") {
+            this.updatePendingWorktree(id, (currentEntry) => ({
+              ...currentEntry,
+              worktreeGitRoot: event.worktreeGitRoot,
+            }));
+            return;
+          }
+
+          if (event.text.length === 0) {
+            return;
+          }
+          this.updatePendingWorktree(id, (currentEntry) => ({
+            ...currentEntry,
+            outputText: `${currentEntry.outputText}${event.text}`,
+          }));
+        },
+      )) as {
+        worktreeGitRoot?: unknown;
+        worktreeWorkspaceRoot?: unknown;
+      };
+
+      const worktreeGitRoot =
+        typeof result.worktreeGitRoot === "string" ? result.worktreeGitRoot : null;
+      const worktreeWorkspaceRoot =
+        typeof result.worktreeWorkspaceRoot === "string" ? result.worktreeWorkspaceRoot : null;
+      if (!worktreeGitRoot || !worktreeWorkspaceRoot) {
+        throw new Error("Git worker returned an invalid create-worktree result.");
+      }
+
+      this.updatePendingWorktree(id, (currentEntry) => ({
+        ...currentEntry,
+        phase: "worktree-ready",
+        worktreeGitRoot,
+        worktreeWorkspaceRoot,
+        errorMessage: null,
+        needsAttention: false,
+      }));
+
+      if (entry.launchMode === "create-stable-worktree") {
+        this.ensureWorkspaceRoot(worktreeWorkspaceRoot, {
+          setActive: true,
+          label: entry.label.trim() || basename(worktreeWorkspaceRoot) || "Workspace",
+        });
+        await this.persistWorkspaceRootRegistry();
+        this.emitWorkspaceRootsUpdated();
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      this.updatePendingWorktree(id, (currentEntry) => ({
+        ...currentEntry,
+        phase: "failed",
+        errorMessage: normalizeError(error).message,
+        needsAttention: true,
+      }));
+    } finally {
+      if (this.pendingWorktreeRequests.get(id) === controller) {
+        this.pendingWorktreeRequests.delete(id);
+      }
+    }
+  }
+
+  private isMessageForThisHost(hostId: unknown): boolean {
+    return typeof hostId !== "string" || hostId === this.hostId;
+  }
+
+  private findPendingWorktree(id: string): PendingWorktreeEntry | null {
+    return this.readPendingWorktrees().find((entry) => entry.id === id) ?? null;
+  }
+
+  private readPendingWorktrees(): PendingWorktreeEntry[] {
+    const value = this.persistedAtoms.get("pending_worktrees");
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.filter(isPendingWorktreeEntry);
+  }
+
+  private writePendingWorktrees(entries: PendingWorktreeEntry[]): void {
+    this.handlePersistedAtomUpdate({
+      type: "persisted-atom-update",
+      key: "pending_worktrees",
+      value: entries,
+    });
+  }
+
+  private upsertPendingWorktree(entry: PendingWorktreeEntry): void {
+    const entries = this.readPendingWorktrees().filter(
+      (currentEntry) => currentEntry.id !== entry.id,
+    );
+    entries.push(entry);
+    this.writePendingWorktrees(entries);
+  }
+
+  private removePendingWorktree(id: string): void {
+    const entries = this.readPendingWorktrees().filter((entry) => entry.id !== id);
+    this.writePendingWorktrees(entries);
+  }
+
+  private updatePendingWorktree(
+    id: string,
+    update: (entry: PendingWorktreeEntry) => PendingWorktreeEntry,
+  ): PendingWorktreeEntry | null {
+    let nextEntry: PendingWorktreeEntry | null = null;
+    const entries = this.readPendingWorktrees().map((entry) => {
+      if (entry.id !== id) {
+        return entry;
+      }
+
+      nextEntry = update(entry);
+      return nextEntry;
+    });
+    if (!nextEntry) {
+      return null;
+    }
+
+    this.writePendingWorktrees(entries);
+    return nextEntry;
+  }
+
+  private syncPendingWorktreesSharedObject(): void {
+    this.sharedObjects.set("pending_worktrees", this.readPendingWorktrees());
+    if (this.sharedObjectSubscriptions.has("pending_worktrees")) {
+      this.emitSharedObjectUpdate("pending_worktrees");
+    }
   }
 
   private handleSharedObjectSubscribe(message: JsonRecord): void {
@@ -4602,6 +4914,220 @@ function readFetchErrorMessage(body: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function parsePendingWorktreeEntryRequest(
+  value: unknown,
+  hostId: string,
+): PendingWorktreeEntry | null {
+  if (!isJsonRecord(value)) {
+    return null;
+  }
+
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  const label = typeof value.label === "string" ? value.label : "";
+  const sourceWorkspaceRoot =
+    typeof value.sourceWorkspaceRoot === "string" ? value.sourceWorkspaceRoot : "";
+  const prompt = typeof value.prompt === "string" ? value.prompt : "";
+  const localEnvironmentConfigPath =
+    typeof value.localEnvironmentConfigPath === "string" ? value.localEnvironmentConfigPath : null;
+  const sourceConversationId =
+    typeof value.sourceConversationId === "string" ? value.sourceConversationId : null;
+  const sourceCollaborationMode =
+    typeof value.sourceCollaborationMode === "string" ? value.sourceCollaborationMode : null;
+
+  if (!id || !sourceWorkspaceRoot || !prompt) {
+    return null;
+  }
+  if (!isJsonRecord(value.startingState) || typeof value.startingState.type !== "string") {
+    return null;
+  }
+
+  const launchMode = parsePendingWorktreeLaunchMode(value.launchMode);
+  if (!launchMode) {
+    return null;
+  }
+
+  return {
+    id,
+    hostId,
+    createdAt: Date.now(),
+    phase: "queued",
+    labelEdited: false,
+    outputText: "",
+    errorMessage: null,
+    worktreeWorkspaceRoot: null,
+    worktreeGitRoot: null,
+    needsAttention: false,
+    isPinned: false,
+    label,
+    sourceWorkspaceRoot,
+    startingState: value.startingState,
+    localEnvironmentConfigPath,
+    prompt,
+    launchMode,
+    startConversationParamsInput: value.startConversationParamsInput ?? null,
+    sourceConversationId,
+    sourceCollaborationMode,
+  };
+}
+
+function parsePendingWorktreeLaunchMode(value: unknown): PendingWorktreeLaunchMode | null {
+  switch (value) {
+    case "create-stable-worktree":
+    case "fork-conversation":
+    case "start-conversation":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function parsePendingWorktreeMetadataUpdate(value: unknown):
+  | {
+      type: "isPinned";
+      isPinned: boolean;
+    }
+  | {
+      type: "label";
+      label: string;
+    }
+  | {
+      type: "labelEdited";
+      labelEdited: boolean;
+    }
+  | {
+      type: "needsAttention";
+      needsAttention: boolean;
+    }
+  | null {
+  if (!isJsonRecord(value) || typeof value.type !== "string") {
+    return null;
+  }
+
+  switch (value.type) {
+    case "isPinned":
+      return typeof value.isPinned === "boolean"
+        ? {
+            type: "isPinned",
+            isPinned: value.isPinned,
+          }
+        : null;
+    case "label":
+      return typeof value.label === "string"
+        ? {
+            type: "label",
+            label: value.label,
+          }
+        : null;
+    case "labelEdited":
+      return typeof value.labelEdited === "boolean"
+        ? {
+            type: "labelEdited",
+            labelEdited: value.labelEdited,
+          }
+        : null;
+    case "needsAttention":
+      return typeof value.needsAttention === "boolean"
+        ? {
+            type: "needsAttention",
+            needsAttention: value.needsAttention,
+          }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function isPendingWorktreeEntry(value: unknown): value is PendingWorktreeEntry {
+  return (
+    isJsonRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.hostId === "string" &&
+    typeof value.label === "string" &&
+    typeof value.sourceWorkspaceRoot === "string" &&
+    typeof value.outputText === "string" &&
+    typeof value.prompt === "string" &&
+    (value.errorMessage === null || typeof value.errorMessage === "string") &&
+    (value.worktreeWorkspaceRoot === null || typeof value.worktreeWorkspaceRoot === "string") &&
+    (value.worktreeGitRoot === null || typeof value.worktreeGitRoot === "string") &&
+    typeof value.labelEdited === "boolean" &&
+    typeof value.needsAttention === "boolean" &&
+    typeof value.isPinned === "boolean" &&
+    isJsonRecord(value.startingState) &&
+    typeof value.startingState.type === "string" &&
+    (value.localEnvironmentConfigPath === null ||
+      typeof value.localEnvironmentConfigPath === "string") &&
+    (value.sourceConversationId === null || typeof value.sourceConversationId === "string") &&
+    (value.sourceCollaborationMode === null || typeof value.sourceCollaborationMode === "string") &&
+    (value.phase === "queued" ||
+      value.phase === "creating" ||
+      value.phase === "worktree-ready" ||
+      value.phase === "failed") &&
+    (value.launchMode === "create-stable-worktree" ||
+      value.launchMode === "fork-conversation" ||
+      value.launchMode === "start-conversation")
+  );
+}
+
+function readPendingWorktreeWorkerEvent(
+  message: JsonRecord,
+  streamId: string,
+):
+  | {
+      type: "path";
+      worktreeGitRoot: string;
+    }
+  | {
+      type: "stream";
+      text: string;
+    }
+  | null {
+  if (message.type !== "worker-event" || !isJsonRecord(message.event)) {
+    return null;
+  }
+
+  if (
+    message.event.type === "create-worktree-path" &&
+    message.event.streamId === streamId &&
+    typeof message.event.worktreeGitRoot === "string"
+  ) {
+    return {
+      type: "path",
+      worktreeGitRoot: message.event.worktreeGitRoot,
+    };
+  }
+
+  if (message.event.type !== "create-worktree-stream" || message.event.streamId !== streamId) {
+    return null;
+  }
+
+  return {
+    type: "stream",
+    text: readPendingWorktreeWorkerText(message.event.data),
+  };
+}
+
+function readPendingWorktreeWorkerText(data: unknown): string {
+  if (data instanceof Uint8Array) {
+    return Buffer.from(data).toString("utf8");
+  }
+
+  if (Array.isArray(data) && data.every((value) => typeof value === "number")) {
+    return Buffer.from(data).toString("utf8");
+  }
+
+  if (!isJsonRecord(data)) {
+    return "";
+  }
+
+  const bytes = Object.entries(data)
+    .filter(
+      (entry): entry is [string, number] => /^\d+$/.test(entry[0]) && typeof entry[1] === "number",
+    )
+    .sort((left, right) => Number(left[0]) - Number(right[0]))
+    .map(([, value]) => value);
+  return bytes.length > 0 ? Buffer.from(bytes).toString("utf8") : "";
 }
 
 function uniqueStrings(values: unknown[]): string[] {
