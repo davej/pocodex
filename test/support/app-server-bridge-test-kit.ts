@@ -276,12 +276,18 @@ export async function createBridge(
     tempDirs.push(tempDirectory);
     workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
   }
+  let persistedAtomRegistryPath = options.persistedAtomRegistryPath;
+  if (!persistedAtomRegistryPath) {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-persisted-atoms-"));
+    tempDirs.push(tempDirectory);
+    persistedAtomRegistryPath = join(tempDirectory, "persisted-atoms.json");
+  }
   return AppServerBridge.connect({
     appPath: "/Applications/Codex.app",
     codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
     codexHomePath: options.codexHomePath,
-    persistedAtomRegistryPath: options.persistedAtomRegistryPath,
+    persistedAtomRegistryPath,
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,
   });
