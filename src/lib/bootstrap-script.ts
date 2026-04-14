@@ -7,6 +7,11 @@ import { serializeInlineScript } from "./inline-script.js";
 
 export interface BootstrapScriptConfig {
   devMode?: boolean;
+  hostConfig?: {
+    id: string;
+    display_name: string;
+    kind: "git" | "local";
+  };
   sentryOptions: SentryInitOptions;
   stylesheetHref: string;
   importIconSvg?: string;
@@ -99,8 +104,12 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     windowType: "electron";
     sendMessageFromView(message: unknown): Promise<void>;
     getPathForFile(): null;
+    getSharedObjectSnapshotValue?(key: string): unknown;
+    getSystemThemeVariant?(): "light" | "dark";
     sendWorkerMessageFromView(workerName: string, message: unknown): Promise<void>;
+    showApplicationMenu?(menuId: string, x: number, y: number): Promise<void>;
     subscribeToWorkerMessages(workerName: string, callback: WorkerMessageListener): () => void;
+    subscribeToSystemThemeVariant?(callback: () => void): () => void;
     showContextMenu(): Promise<void>;
     getFastModeRolloutMetrics(): Promise<Record<string, never>>;
     triggerSentryTestError(): Promise<void>;
@@ -146,6 +155,17 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   const workerSubscribers = new Map<string, Set<WorkerMessageListener>>();
   const restorableTerminalAttachments = new Map<string, RestorableTerminalAttachment>();
+  const sharedObjectSnapshots = new Map<string, unknown>([
+    [
+      "host_config",
+      config.hostConfig ?? {
+        id: LOCAL_HOST_ID,
+        display_name: "Local",
+        kind: "local",
+      },
+    ],
+    ["remote_connections", []],
+  ]);
   const pendingMessages: string[] = [];
   const toastHost = document.createElement("div");
   const statusHost = document.createElement("div");
@@ -2323,9 +2343,20 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     const overriddenMessage = overrideEnterBehaviorInMessage(message);
     rememberDispatchedEnterBehavior(overriddenMessage);
     syncSidebarModeWithBridgeMessage(overriddenMessage);
+    if (isRecord(overriddenMessage)) {
+      rememberSharedObjectSnapshot(overriddenMessage);
+    }
     syncThreadQueryWithBridgeMessage(overriddenMessage);
     syncRestorableTerminalAttachments(overriddenMessage, "incoming");
     return overriddenMessage;
+  }
+
+  function rememberSharedObjectSnapshot(message: Record<string, unknown>): void {
+    if (message.type !== "shared-object-updated" || typeof message.key !== "string") {
+      return;
+    }
+
+    sharedObjectSnapshots.set(message.key, message.value ?? null);
   }
 
   function overrideEnterBehaviorInMessage(message: Record<string, unknown>): unknown {
@@ -3478,6 +3509,48 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return typeof value === "object" && value !== null;
   }
 
+  function readSystemThemeVariant(): "light" | "dark" {
+    if (typeof window.matchMedia !== "function") {
+      return "light";
+    }
+
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  function observeSystemThemeVariant(callback: () => void): () => void {
+    if (typeof window.matchMedia !== "function") {
+      return () => {};
+    }
+
+    const mediaQueryList = window.matchMedia("(prefers-color-scheme: dark)");
+    const listener = () => {
+      callback();
+    };
+
+    if (typeof mediaQueryList.addEventListener === "function") {
+      mediaQueryList.addEventListener("change", listener);
+      return () => {
+        mediaQueryList.removeEventListener("change", listener);
+      };
+    }
+
+    const legacyMediaQueryList = mediaQueryList as MediaQueryList & {
+      addListener?: (listener: (event: unknown) => void) => void;
+      removeListener?: (listener: (event: unknown) => void) => void;
+    };
+    if (
+      typeof legacyMediaQueryList.addListener === "function" &&
+      typeof legacyMediaQueryList.removeListener === "function"
+    ) {
+      legacyMediaQueryList.addListener(listener);
+      return () => {
+        legacyMediaQueryList.removeListener?.(listener);
+      };
+    }
+
+    return () => {};
+  }
+
   function addWorkerSubscriber(workerName: string, callback: WorkerMessageListener): () => void {
     let listeners = workerSubscribers.get(workerName);
     if (!listeners) {
@@ -3518,10 +3591,16 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       }
     },
     getPathForFile: () => null,
+    getSharedObjectSnapshotValue: (key) => sharedObjectSnapshots.get(key) ?? null,
+    getSystemThemeVariant: () => readSystemThemeVariant(),
     sendWorkerMessageFromView: async (workerName, message) => {
       sendEnvelope({ type: "worker_message", workerName, message });
     },
+    showApplicationMenu: async () => {
+      showNotice("Application menus are not available in Pocodex.");
+    },
     subscribeToWorkerMessages: (workerName, callback) => addWorkerSubscriber(workerName, callback),
+    subscribeToSystemThemeVariant: (callback) => observeSystemThemeVariant(callback),
     showContextMenu: async () => {
       showNotice("Context menus are not available in Pocodex.");
     },
@@ -3533,6 +3612,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   };
 
   const nativeFetch: typeof window.fetch = window.fetch.bind(window);
+
   window.fetch = (input, init) => {
     const url =
       typeof input === "string" ? input : input instanceof Request ? input.url : String(input);

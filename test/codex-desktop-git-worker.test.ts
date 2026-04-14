@@ -160,6 +160,45 @@ describe("DefaultCodexDesktopGitWorkerBridge", () => {
     await bridge.close();
   });
 
+  it("supports the platform-family main RPC method used by current desktop workers", async () => {
+    const bridge = new DefaultCodexDesktopGitWorkerBridge({
+      appPath: "/Applications/Codex.app",
+      resolveWorkerScript: async () => ({
+        workerPath: "/tmp/pocodex-worker.js",
+        metadata: {
+          appPath: "/Applications/Codex.app",
+          buildFlavor: "stable",
+          buildNumber: "123",
+          version: "1.2.3",
+        },
+      }),
+      WorkerClass: FakeWorker as never,
+    });
+
+    await bridge.subscribe();
+
+    const worker = FakeWorker.instances[0];
+    worker?.emit("message", {
+      type: "worker-main-rpc-request",
+      workerId: "git",
+      requestId: "rpc-platform-family",
+      method: "platform-family",
+    });
+
+    expect(worker?.postedMessages.at(-1)).toEqual({
+      type: "worker-main-rpc-response",
+      workerId: "git",
+      requestId: "rpc-platform-family",
+      method: "platform-family",
+      result: {
+        type: "ok",
+        value: process.platform === "win32" ? "windows" : "unix",
+      },
+    });
+
+    await bridge.close();
+  });
+
   it("returns an explicit error for unknown main RPC methods", async () => {
     const bridge = new DefaultCodexDesktopGitWorkerBridge({
       appPath: "/Applications/Codex.app",

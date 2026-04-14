@@ -489,16 +489,48 @@ function readTestAttribute(element: TestElement, name: string): string | null {
   return element.getAttribute(name);
 }
 
-function drainTestTimers(pendingTimers: Map<number, () => void>, maxRuns = 20): void {
+interface TestTimer {
+  callback: () => void;
+  delay: number;
+}
+
+function drainTestTimers(pendingTimers: Map<number, TestTimer>, maxRuns = 20): void {
   for (let index = 0; index < maxRuns; index += 1) {
-    const next = pendingTimers.entries().next().value as [number, () => void] | undefined;
+    const next = pendingTimers.entries().next().value as [number, TestTimer] | undefined;
     if (!next) {
       return;
     }
 
-    const [timerId, callback] = next;
+    const [timerId, timer] = next;
     pendingTimers.delete(timerId);
-    callback();
+    timer.callback();
+  }
+}
+
+function drainTestTimersByDelay(pendingTimers: Map<number, TestTimer>, maxRuns = 20): void {
+  for (let index = 0; index < maxRuns; index += 1) {
+    const scheduledTimers = Array.from(pendingTimers.entries());
+    if (scheduledTimers.length === 0) {
+      return;
+    }
+
+    const nextDelay = Math.min(...scheduledTimers.map(([, timer]) => timer.delay));
+    if (nextDelay > 0) {
+      for (const timer of pendingTimers.values()) {
+        timer.delay = Math.max(0, timer.delay - nextDelay);
+      }
+    }
+
+    const next = Array.from(pendingTimers.entries())
+      .filter(([, timer]) => timer.delay === 0)
+      .sort((left, right) => left[0] - right[0])[0];
+    if (!next) {
+      return;
+    }
+
+    const [timerId, timer] = next;
+    pendingTimers.delete(timerId);
+    timer.callback();
   }
 }
 
@@ -560,7 +592,7 @@ function createBootstrapHarness(
     scriptUrl: string;
     options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" };
   }> = [];
-  const timers = new Map<number, () => void>();
+  const timers = new Map<number, TestTimer>();
   const fetchCalls: Array<{ input: unknown; init: unknown }> = [];
   const dispatchedMessages: unknown[] = [];
   const replaceStateCalls: Array<string | URL | null | undefined> = [];
@@ -594,7 +626,7 @@ function createBootstrapHarness(
       replaceState: (data: unknown, unused: string, url?: string | URL | null) => void;
     };
     fetch: (input: unknown, init?: unknown) => Promise<unknown>;
-    setTimeout: (callback: () => void, delay: number) => number;
+    setTimeout: (callback: () => void, delay?: number) => number;
     clearTimeout: (id: number) => void;
     matchMedia: (query: string) => { matches: boolean; media: string };
     navigator: {
@@ -654,9 +686,9 @@ function createBootstrapHarness(
     fetchCalls.push({ input, init });
     return fetchImplementation(input, init);
   };
-  windowObject.setTimeout = (callback: () => void) => {
+  windowObject.setTimeout = (callback: () => void, delay = 0) => {
     const id = nextTimerId++;
-    timers.set(id, callback);
+    timers.set(id, { callback, delay });
     return id;
   };
   windowObject.clearTimeout = (id: number) => {
@@ -754,9 +786,17 @@ function createBootstrapHarness(
     },
     getElectronBridge(): {
       sendMessageFromView: (message: unknown) => Promise<void>;
+      getSharedObjectSnapshotValue?: (key: string) => unknown;
+      getSystemThemeVariant?: () => "light" | "dark";
+      showApplicationMenu?: (menuId: string, x: number, y: number) => Promise<void>;
+      subscribeToSystemThemeVariant?: (callback: () => void) => () => void;
     } {
       return Reflect.get(windowObject, "electronBridge") as {
         sendMessageFromView: (message: unknown) => Promise<void>;
+        getSharedObjectSnapshotValue?: (key: string) => unknown;
+        getSystemThemeVariant?: () => "light" | "dark";
+        showApplicationMenu?: (menuId: string, x: number, y: number) => Promise<void>;
+        subscribeToSystemThemeVariant?: (callback: () => void) => () => void;
       };
     },
     emitServerEnvelope(envelope: unknown): void {
@@ -840,6 +880,40 @@ describe("renderBootstrapScript", () => {
         },
       },
     ]);
+  });
+
+  it("exposes the current electron bridge compatibility methods and seeds host config", async () => {
+    const harness = createBootstrapHarness();
+    const hostConfig = {
+      id: "workspace",
+      display_name: "Workspace",
+      kind: "git" as const,
+    };
+    const script = renderBootstrapScript({
+      hostConfig,
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    harness.run(script);
+
+    const bridge = harness.getElectronBridge();
+
+    expect(typeof bridge.getSharedObjectSnapshotValue).toBe("function");
+    expect(bridge.getSharedObjectSnapshotValue?.("host_config")).toEqual(hostConfig);
+    expect(bridge.getSharedObjectSnapshotValue?.("remote_connections")).toEqual([]);
+    expect(typeof bridge.getSystemThemeVariant).toBe("function");
+    expect(bridge.getSystemThemeVariant?.()).toBe("light");
+    expect(typeof bridge.subscribeToSystemThemeVariant).toBe("function");
+    expect(typeof bridge.subscribeToSystemThemeVariant?.(() => {})).toBe("function");
+
+    await expect(bridge.showApplicationMenu?.("main", 12, 24)).resolves.toBeUndefined();
+    expect(harness.document.querySelector("[data-pocodex-toast='true']")).toBeTruthy();
   });
 
   it("offers reconnect and reload actions from the connection status overlay", async () => {
@@ -2662,18 +2736,18 @@ describe("renderBootstrapScript", () => {
     await flushBootstrapMicrotasks();
     harness.openSocket();
 
-    drainTestTimers(harness.timers, 1);
+    drainTestTimersByDelay(harness.timers, 1);
 
     expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
 
     contentPane.setBoundingClientRect({ left: 0, width: 1280 });
-    drainTestTimers(harness.timers);
+    drainTestTimersByDelay(harness.timers);
 
     expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
 
     contentPane.setBoundingClientRect({ left: 300, width: 980 });
     harness.document.dispatchEvent(new TestMouseEvent("click", { target: toggleButton }));
-    drainTestTimers(harness.timers);
+    drainTestTimersByDelay(harness.timers);
 
     expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("expanded");
   });
@@ -2737,13 +2811,13 @@ describe("renderBootstrapScript", () => {
     await flushBootstrapMicrotasks();
     harness.openSocket();
 
-    drainTestTimers(harness.timers, 1);
+    drainTestTimersByDelay(harness.timers, 1);
     expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
 
     contentPane.setAttribute("class", "main-surface left-0");
     contentPane.setBoundingClientRect({ left: 0, width: 1280 });
     harness.windowObject.dispatchEvent({ type: "resize" });
-    drainTestTimers(harness.timers);
+    drainTestTimersByDelay(harness.timers);
 
     contentPane.setAttribute("class", "main-surface left-token-sidebar");
     contentPane.setBoundingClientRect({ left: 300, width: 980 });
@@ -2842,7 +2916,7 @@ describe("renderBootstrapScript", () => {
     contentPane.style.transform = "translateX(0)";
     contentPane.setBoundingClientRect({ left: 0, width: 390 });
     navigation.setBoundingClientRect({ left: 0, width: 240 });
-    drainTestTimers(harness.timers);
+    drainTestTimersByDelay(harness.timers);
 
     expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
 

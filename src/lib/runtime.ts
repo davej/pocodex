@@ -5,7 +5,11 @@ import { basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 
-import { AppServerBridge } from "./app-server-bridge.js";
+import {
+  AppServerBridge,
+  buildLocalHostConfig,
+  resolveLocalHostKind,
+} from "./app-server-bridge.js";
 import { renderBootstrapScript } from "./bootstrap-script.js";
 import { loadCodexBundle } from "./codex-bundle.js";
 import { patchIndexHtml } from "./html-patcher.js";
@@ -152,10 +156,12 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
       const bundle = await loadCodexBundle(this.options.appPath);
       const pocodexCssPath = fileURLToPath(new URL("../pocodex.css", import.meta.url));
       const importIconSvgPath = fileURLToPath(new URL("../images/import.svg", import.meta.url));
+      const hostKind = await resolveLocalHostKind(this.options.cwd);
 
       relay = await AppServerBridge.connect({
         appPath: this.options.appPath,
         cwd: this.options.cwd,
+        hostKind,
       });
 
       relayErrorListener = (error) => {
@@ -191,6 +197,7 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
           return patchIndexHtml(indexHtml, {
             bootstrapScript: renderBootstrapScript({
               devMode: this.options.devMode,
+              hostConfig: buildLocalHostConfig("local", hostKind),
               sentryOptions,
               stylesheetHref: POCODEX_STYLESHEET_HREF,
               importIconSvg: await readFile(importIconSvgPath, "utf8"),
