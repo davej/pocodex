@@ -166,6 +166,28 @@ interface GitRepositoryInfo {
   originUrl: string | null;
 }
 
+interface GitCheckoutBranchRequest {
+  cwd: string;
+  branch: string;
+}
+
+interface GitCheckoutBranchResponse {
+  status: "success" | "error";
+  error?: string;
+  errorType?: "blocked-by-working-tree-changes";
+  conflictedPaths?: string[];
+  execOutput?: {
+    command: string;
+    output: string;
+  };
+}
+
+interface ExecCommandResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
 interface GitOriginsResponse {
   origins: GitOriginRecord[];
   homeDir: string;
@@ -1740,6 +1762,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const url = new URL(rawUrl);
     const path = url.pathname.replace(/^\/+/, "");
     switch (path) {
+      case "git-checkout-branch":
+        try {
+          return {
+            status: 200,
+            body: await this.handleGitCheckoutBranchRequest(body),
+          };
+        } catch (error) {
+          return {
+            status: 400,
+            body: {
+              error: normalizeError(error).message,
+            },
+          };
+        }
       case "apply-patch":
         try {
           return {
@@ -2001,6 +2037,38 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       default:
         return null;
     }
+  }
+
+  private async handleGitCheckoutBranchRequest(body: unknown): Promise<GitCheckoutBranchResponse> {
+    const request = readGitCheckoutBranchRequest(body);
+    const cwd = resolve(request.cwd);
+    const args = ["checkout", "--quiet", request.branch];
+    const command = `git ${args.join(" ")}`;
+    const result = await execGitCommand(cwd, args);
+    if (result.ok) {
+      return {
+        status: "success",
+      };
+    }
+
+    const conflictedPaths = parseGitCheckoutBlockedPaths(result.stderr);
+    const execOutput = buildExecOutput(command, result.stdout, result.stderr);
+    const response: GitCheckoutBranchResponse = {
+      status: "error",
+      error:
+        conflictedPaths.length > 0
+          ? "Your working tree has changes that would be overwritten by checkout."
+          : readGitCheckoutErrorMessage(result.stderr),
+    };
+    if (conflictedPaths.length > 0) {
+      response.errorType = "blocked-by-working-tree-changes";
+      response.conflictedPaths = conflictedPaths;
+    }
+    if (execOutput) {
+      response.execOutput = execOutput;
+    }
+
+    return response;
   }
 
   private async handleRelativeFetchRequest(
@@ -3787,7 +3855,15 @@ function readGitOriginDirectories(body: unknown): string[] {
 }
 
 async function runGitCommand(cwd: string, args: string[]): Promise<string> {
-  return new Promise<string>((resolveOutput, reject) => {
+  const result = await execGitCommand(cwd, args);
+  if (!result.ok) {
+    throw new Error(result.stderr || `git ${args.join(" ")} failed.`);
+  }
+  return result.stdout;
+}
+
+async function execGitCommand(cwd: string, args: string[]): Promise<ExecCommandResult> {
+  return new Promise((resolveResult) => {
     execFile(
       "git",
       args,
@@ -3796,15 +3872,102 @@ async function runGitCommand(cwd: string, args: string[]): Promise<string> {
         encoding: "utf8",
         maxBuffer: 1024 * 1024,
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
+        const trimmedStdout = stdout.trim();
+        const trimmedStderr = stderr.trim();
         if (error) {
-          reject(error);
+          resolveResult({
+            ok: false,
+            stdout: trimmedStdout,
+            stderr: trimmedStderr || normalizeError(error).message,
+          });
           return;
         }
-        resolveOutput(stdout.trim());
+
+        resolveResult({
+          ok: true,
+          stdout: trimmedStdout,
+          stderr: trimmedStderr,
+        });
       },
     );
   });
+}
+
+function parseGitCheckoutBlockedPaths(stderr: string): string[] {
+  const lines = stderr.split(/\r?\n/);
+  const markerIndex = lines.findIndex((line) =>
+    /would be overwritten by checkout:?$/i.test(line.trim()),
+  );
+  if (markerIndex < 0) {
+    return [];
+  }
+
+  const conflictedPaths: string[] = [];
+  for (const line of lines.slice(markerIndex + 1)) {
+    if (!/^\s+/.test(line)) {
+      break;
+    }
+
+    const path = line.trim();
+    if (path.length > 0) {
+      conflictedPaths.push(path);
+    }
+  }
+
+  return uniqueStrings(conflictedPaths);
+}
+
+function readGitCheckoutErrorMessage(stderr: string): string {
+  const firstLine = stderr
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^(error|fatal):\s*/i, "").trim())
+    .find((line) => line.length > 0 && line.toLowerCase() !== "aborting");
+  return firstLine ?? "Failed to switch branch.";
+}
+
+function buildExecOutput(
+  command: string,
+  stdout: string,
+  stderr: string,
+): { command: string; output: string } | null {
+  const output = [stdout, stderr].filter((value) => value.trim().length > 0).join("\n\n");
+  if (output.length === 0) {
+    return null;
+  }
+
+  return {
+    command,
+    output,
+  };
+}
+
+function readGitCheckoutBranchRequest(body: unknown): GitCheckoutBranchRequest {
+  const params = readCodexFetchParams(body);
+  if (!isJsonRecord(params)) {
+    throw new Error("Checkout params are required.");
+  }
+
+  const cwd =
+    typeof params.cwd === "string"
+      ? params.cwd.trim()
+      : typeof params.root === "string"
+        ? params.root.trim()
+        : "";
+  const branch =
+    typeof params.branch === "string"
+      ? params.branch.trim()
+      : typeof params.branchName === "string"
+        ? params.branchName.trim()
+        : "";
+  if (cwd.length === 0) {
+    throw new Error("Checkout cwd is required.");
+  }
+  if (branch.length === 0) {
+    throw new Error("Checkout branch is required.");
+  }
+
+  return { cwd, branch };
 }
 
 async function execGhCommand(
