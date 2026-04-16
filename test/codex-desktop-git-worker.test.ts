@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import process from "node:process";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -39,9 +39,18 @@ class FakeWorker extends EventEmitter {
   }
 }
 
+const originalCodexHome = process.env.CODEX_HOME;
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+const originalWslDistroName = process.env.WSL_DISTRO_NAME;
+
 describe("DefaultCodexDesktopGitWorkerBridge", () => {
   afterEach(() => {
     FakeWorker.instances = [];
+    restoreEnv("CODEX_HOME", originalCodexHome);
+    restoreEnv("HOME", originalHome);
+    restoreEnv("USERPROFILE", originalUserProfile);
+    restoreEnv("WSL_DISTRO_NAME", originalWslDistroName);
   });
 
   it("spawns the desktop worker lazily and forwards git messages", async () => {
@@ -595,6 +604,222 @@ describe("DefaultCodexDesktopGitWorkerBridge", () => {
       await rm(tempDirectory, { recursive: true, force: true });
     }
   }, 20_000);
+
+  it("handles codex-worktrees locally across Codex home candidates and directory names", async () => {
+    const bridge = new DefaultCodexDesktopGitWorkerBridge({
+      appPath: "/Applications/Codex.app",
+      resolveWorkerScript: async () => ({
+        workerPath: "/tmp/pocodex-worker.js",
+        metadata: {
+          appPath: "/Applications/Codex.app",
+          buildFlavor: "stable",
+          buildNumber: "123",
+          version: "1.2.3",
+        },
+      }),
+      WorkerClass: FakeWorker as never,
+    });
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-codex-worktrees-"));
+    const repoRoot = join(tempDirectory, "repo");
+    const primaryCodexHome = join(tempDirectory, "primary-codex-home");
+    const secondaryUserProfile = join(tempDirectory, "windows-user");
+    const secondaryCodexHome = join(secondaryUserProfile, ".codex");
+    const homeDirectory = join(tempDirectory, "home");
+    const primaryWorktree = join(primaryCodexHome, "worktrees", "abcd", "pocodex");
+    const secondaryWorktree = join(secondaryCodexHome, "worktrees", "zz9569", "pocodex");
+
+    process.env.CODEX_HOME = primaryCodexHome;
+    process.env.HOME = homeDirectory;
+    process.env.USERPROFILE = secondaryUserProfile;
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+
+    try {
+      await initializeGitRepository(repoRoot);
+      await createDetachedWorktree(repoRoot, primaryWorktree);
+      await createDetachedWorktree(repoRoot, secondaryWorktree);
+
+      const responsePromise = waitForBridgeWorkerResponse(bridge, "codex-worktrees-1");
+      await bridge.send({
+        type: "worker-request",
+        workerId: "git",
+        request: {
+          id: "codex-worktrees-1",
+          method: "codex-worktrees",
+          params: {
+            hostConfig: {
+              id: "local",
+              display_name: "Local",
+              kind: "git",
+            },
+          },
+        },
+      });
+
+      expect(await responsePromise).toMatchObject({
+        type: "worker-response",
+        workerId: "git",
+        response: {
+          id: "codex-worktrees-1",
+          method: "codex-worktrees",
+          result: {
+            type: "ok",
+            value: {
+              worktrees: expect.arrayContaining([
+                expect.objectContaining({
+                  dir: primaryWorktree,
+                  gitDir: expect.any(String),
+                }),
+                expect.objectContaining({
+                  dir: secondaryWorktree,
+                  gitDir: expect.any(String),
+                }),
+              ]),
+            },
+          },
+        },
+      });
+      expect(FakeWorker.instances).toHaveLength(0);
+    } finally {
+      await bridge.close();
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("resolves thread worktrees locally across Codex home candidates", async () => {
+    const bridge = new DefaultCodexDesktopGitWorkerBridge({
+      appPath: "/Applications/Codex.app",
+      resolveWorkerScript: async () => ({
+        workerPath: "/tmp/pocodex-worker.js",
+        metadata: {
+          appPath: "/Applications/Codex.app",
+          buildFlavor: "stable",
+          buildNumber: "123",
+          version: "1.2.3",
+        },
+      }),
+      WorkerClass: FakeWorker as never,
+    });
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-resolve-thread-worktree-"));
+    const repoRoot = join(tempDirectory, "repo");
+    const primaryCodexHome = join(tempDirectory, "primary-codex-home");
+    const secondaryUserProfile = join(tempDirectory, "windows-user");
+    const secondaryCodexHome = join(secondaryUserProfile, ".codex");
+    const homeDirectory = join(tempDirectory, "home");
+    const primaryWorktree = join(primaryCodexHome, "worktrees", "abcd", "pocodex");
+    const secondaryWorktree = join(secondaryCodexHome, "worktrees", "beef", "pocodex");
+
+    process.env.CODEX_HOME = primaryCodexHome;
+    process.env.HOME = homeDirectory;
+    process.env.USERPROFILE = secondaryUserProfile;
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+
+    try {
+      await initializeGitRepository(repoRoot);
+      await createDetachedWorktree(repoRoot, primaryWorktree);
+      await createDetachedWorktree(repoRoot, secondaryWorktree);
+      await writeThreadOwnerConfig(secondaryWorktree, "conv_123");
+
+      const responsePromise = waitForBridgeWorkerResponse(bridge, "resolve-worktree-1");
+      await bridge.send({
+        type: "worker-request",
+        workerId: "git",
+        request: {
+          id: "resolve-worktree-1",
+          method: "resolve-worktree-for-thread",
+          params: {
+            cwd: repoRoot,
+            conversationId: "conv_123",
+            hostConfig: {
+              id: "local",
+              display_name: "Local",
+              kind: "git",
+            },
+          },
+        },
+      });
+
+      expect(await responsePromise).toMatchObject({
+        type: "worker-response",
+        workerId: "git",
+        response: {
+          id: "resolve-worktree-1",
+          method: "resolve-worktree-for-thread",
+          result: {
+            type: "ok",
+            value: {
+              worktreeGitRoot: secondaryWorktree,
+              worktreeWorkspaceRoot: secondaryWorktree,
+              hasUncommittedChanges: false,
+            },
+          },
+        },
+      });
+      expect(FakeWorker.instances).toHaveLength(0);
+    } finally {
+      await bridge.close();
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("forces settings-triggered worktree deletes before forwarding them", async () => {
+    const bridge = new DefaultCodexDesktopGitWorkerBridge({
+      appPath: "/Applications/Codex.app",
+      resolveWorkerScript: async () => ({
+        workerPath: "/tmp/pocodex-worker.js",
+        metadata: {
+          appPath: "/Applications/Codex.app",
+          buildFlavor: "stable",
+          buildNumber: "123",
+          version: "1.2.3",
+        },
+      }),
+      WorkerClass: FakeWorker as never,
+    });
+
+    try {
+      await bridge.send({
+        type: "worker-request",
+        workerId: "git",
+        request: {
+          id: "delete-worktree-1",
+          method: "delete-worktree",
+          params: {
+            worktree: "/tmp/pocodex-worktree",
+            reason: "settings-delete-targeted",
+            hostConfig: {
+              id: "local",
+              display_name: "Local",
+              kind: "git",
+            },
+          },
+        },
+      });
+
+      expect(FakeWorker.instances).toHaveLength(1);
+      expect(FakeWorker.instances[0]?.postedMessages).toEqual([
+        {
+          type: "worker-request",
+          workerId: "git",
+          request: {
+            id: "delete-worktree-1",
+            method: "delete-worktree",
+            params: {
+              worktree: "/tmp/pocodex-worktree",
+              reason: "settings-delete-targeted",
+              force: true,
+              hostConfig: {
+                id: "local",
+                display_name: "Local",
+                kind: "git",
+              },
+            },
+          },
+        },
+      ]);
+    } finally {
+      await bridge.close();
+    }
+  });
 
   it("reports applied paths for hunk-only unstaged revert requests", async () => {
     const bridge = new DefaultCodexDesktopGitWorkerBridge({
@@ -1615,6 +1840,35 @@ async function waitForPostedMessage(
   throw new Error(`Timed out waiting for posted message ${requestId}`);
 }
 
+async function initializeGitRepository(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "README.md"), "# Pocodex\n", "utf8");
+  execFileSync("git", ["init", "-q"], { cwd: directory });
+  execFileSync("git", ["config", "user.name", "Pocodex Test"], { cwd: directory });
+  execFileSync("git", ["config", "user.email", "pocodex@example.com"], { cwd: directory });
+  execFileSync("git", ["add", "README.md"], { cwd: directory });
+  execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: directory });
+}
+
+async function createDetachedWorktree(repoRoot: string, worktreeRoot: string): Promise<void> {
+  await mkdir(dirname(worktreeRoot), { recursive: true });
+  execFileSync("git", ["worktree", "add", "--detach", worktreeRoot, "HEAD"], { cwd: repoRoot });
+}
+
+async function writeThreadOwnerConfig(worktreeRoot: string, conversationId: string): Promise<void> {
+  const gitPath = execFileSync("git", ["rev-parse", "--git-path", "codex-thread.json"], {
+    cwd: worktreeRoot,
+    encoding: "utf8",
+  }).trim();
+  const configPath = gitPath.startsWith("/") ? gitPath : join(worktreeRoot, gitPath);
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ version: 1, ownerThreadId: conversationId }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 async function createGitOnlyPath(tempDirectory: string): Promise<string> {
   const gitBinary = execFileSync("which", ["git"], {
     encoding: "utf8",
@@ -1713,4 +1967,13 @@ function decodeDeltaChunk(value: {
   };
 }): string {
   return Buffer.from(value.params.delta.chunk).toString("utf8");
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+
+  process.env[name] = value;
 }

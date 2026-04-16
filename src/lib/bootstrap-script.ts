@@ -143,8 +143,14 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     "reset",
     "submit",
   ]);
+  const POCODEX_LOCAL_GIT_WORKER_METHODS = new Set([
+    "codex-worktrees",
+    "resolve-worktree-for-thread",
+    "delete-worktree",
+  ]);
 
   const workerSubscribers = new Map<string, Set<WorkerMessageListener>>();
+  const pocodexLocalGitWorkerRequestIds = new Set<string>();
   const restorableTerminalAttachments = new Map<string, RestorableTerminalAttachment>();
   const pendingMessages: string[] = [];
   const toastHost = document.createElement("div");
@@ -2519,6 +2525,21 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return false;
     }
 
+    if (message.type === "pocodex-git-worker-response") {
+      const workerMessage = message.message;
+      const response =
+        isRecord(workerMessage) && isRecord(workerMessage.response) ? workerMessage.response : null;
+      const responseId =
+        response && (typeof response.id === "string" || typeof response.id === "number")
+          ? String(response.id)
+          : null;
+      if (responseId) {
+        pocodexLocalGitWorkerRequestIds.delete(responseId);
+      }
+      dispatchWorkerMessage("git", workerMessage);
+      return true;
+    }
+
     if (message.type === "pocodex-open-workspace-root-picker") {
       const context = message.context === "onboarding" ? "onboarding" : "manual";
       const initialPath = typeof message.initialPath === "string" ? message.initialPath : "";
@@ -3500,6 +3521,75 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     };
   }
 
+  function dispatchWorkerMessage(workerName: string, message: unknown): void {
+    const listeners = workerSubscribers.get(workerName);
+    listeners?.forEach((listener) => listener(message));
+  }
+
+  function shouldHandleGitWorkerMessageLocally(workerName: string, message: unknown): boolean {
+    if (workerName !== "git" || !isRecord(message) || message.type !== "worker-request") {
+      return false;
+    }
+
+    const request = isRecord(message.request) ? message.request : null;
+    return (
+      typeof request?.method === "string" && POCODEX_LOCAL_GIT_WORKER_METHODS.has(request.method)
+    );
+  }
+
+  function maybeSendPocodexLocalGitWorkerRequest(workerName: string, message: unknown): boolean {
+    if (!shouldHandleGitWorkerMessageLocally(workerName, message) || !isRecord(message)) {
+      return false;
+    }
+
+    const request = isRecord(message.request) ? message.request : null;
+    const requestId =
+      request && (typeof request.id === "string" || typeof request.id === "number")
+        ? String(request.id)
+        : null;
+    if (!request || !requestId) {
+      return false;
+    }
+
+    pocodexLocalGitWorkerRequestIds.add(requestId);
+    sendEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "pocodex-git-worker-request",
+        requestId,
+        method: request.method,
+        params: request.params,
+      },
+    });
+    return true;
+  }
+
+  function maybeSendPocodexLocalGitWorkerCancel(workerName: string, message: unknown): boolean {
+    if (
+      workerName !== "git" ||
+      !isRecord(message) ||
+      message.type !== "worker-request-cancel" ||
+      (typeof message.id !== "string" && typeof message.id !== "number")
+    ) {
+      return false;
+    }
+
+    const requestId = String(message.id);
+    if (!pocodexLocalGitWorkerRequestIds.has(requestId)) {
+      return false;
+    }
+
+    pocodexLocalGitWorkerRequestIds.delete(requestId);
+    sendEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "pocodex-git-worker-cancel",
+        requestId,
+      },
+    });
+    return true;
+  }
+
   const electronBridge: ElectronBridge = {
     windowType: "electron",
     sendMessageFromView: async (message) => {
@@ -3519,6 +3609,12 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     },
     getPathForFile: () => null,
     sendWorkerMessageFromView: async (workerName, message) => {
+      if (maybeSendPocodexLocalGitWorkerRequest(workerName, message)) {
+        return;
+      }
+      if (maybeSendPocodexLocalGitWorkerCancel(workerName, message)) {
+        return;
+      }
       sendEnvelope({ type: "worker_message", workerName, message });
     },
     subscribeToWorkerMessages: (workerName, callback) => addWorkerSubscriber(workerName, callback),
