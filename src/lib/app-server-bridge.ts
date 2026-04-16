@@ -45,12 +45,28 @@ import {
 interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
+  extensionInfo?: AppExtensionInfo;
   hostId?: string;
+  hostKind?: LocalHostKind;
   codexHomePath?: string;
   persistedAtomRegistryPath?: string;
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
   codexCliPath?: string;
+}
+
+export type LocalHostKind = "git" | "local";
+
+export interface LocalHostConfig {
+  id: string;
+  display_name: string;
+  kind: LocalHostKind;
+}
+
+interface AppExtensionInfo {
+  version: string;
+  buildFlavor: string;
+  buildNumber: string;
 }
 
 interface WhamUsageCredits {
@@ -270,8 +286,10 @@ const LOCAL_UNSUPPORTED_FETCH_BODY = {
 };
 
 export class AppServerBridge extends EventEmitter implements HostBridge {
+  private readonly extensionInfo: AppExtensionInfo;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly hostId: string;
+  private readonly hostKind: LocalHostKind;
   private readonly cwd: string;
   private readonly terminalManager: TerminalSessionManager;
   private readonly localRequests = new Map<
@@ -315,7 +333,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
   private constructor(options: AppServerBridgeOptions) {
     super();
+    this.extensionInfo = options.extensionInfo ?? {
+      version: "0.1.0",
+      buildFlavor: "pocodex",
+      buildNumber: "0",
+    };
     this.hostId = options.hostId ?? "local";
+    this.hostKind = options.hostKind ?? "local";
     this.cwd = options.cwd;
     this.codexHomePath = options.codexHomePath ?? deriveCodexHomePath();
     this.persistedAtomRegistryPath =
@@ -821,7 +845,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       clientInfo: {
         name: "pocodex",
         title: "Pocodex",
-        version: "0.1.0",
+        version: this.extensionInfo.version,
       },
       capabilities: {
         experimentalApi: true,
@@ -1811,11 +1835,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "extension-info":
         return {
           status: 200,
-          body: {
-            version: "0.1.0",
-            buildFlavor: "pocodex",
-            buildNumber: "0",
-          },
+          body: this.extensionInfo,
         };
       case "is-copilot-api-available":
         return {
@@ -2990,12 +3010,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
-  private buildHostConfig(): Record<string, string> {
-    return {
-      id: this.hostId,
-      display_name: "Local",
-      kind: "local",
-    };
+  private buildHostConfig(): LocalHostConfig {
+    return buildLocalHostConfig(this.hostId, this.hostKind);
   }
 
   private emitFetchSuccess(
@@ -3586,6 +3602,22 @@ async function resolveGitOrigins(
     origins: Array.from(originsByDir.values()),
     homeDir: homedir(),
   };
+}
+
+export function buildLocalHostConfig(
+  hostId = "local",
+  hostKind: LocalHostKind = "local",
+): LocalHostConfig {
+  return {
+    id: hostId,
+    display_name: "Local",
+    kind: hostKind,
+  };
+}
+
+export async function resolveLocalHostKind(cwd: string): Promise<LocalHostKind> {
+  const repository = await resolveGitRepository(cwd, new Map<string, GitRepositoryInfo>());
+  return repository ? "git" : "local";
 }
 
 async function resolveGitOrigin(

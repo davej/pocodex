@@ -754,9 +754,11 @@ function createBootstrapHarness(
     },
     getElectronBridge(): {
       sendMessageFromView: (message: unknown) => Promise<void>;
+      getSharedObjectSnapshotValue?: (key: string) => unknown;
     } {
       return Reflect.get(windowObject, "electronBridge") as {
         sendMessageFromView: (message: unknown) => Promise<void>;
+        getSharedObjectSnapshotValue?: (key: string) => unknown;
       };
     },
     emitServerEnvelope(envelope: unknown): void {
@@ -840,6 +842,33 @@ describe("renderBootstrapScript", () => {
         },
       },
     ]);
+  });
+
+  it("seeds shared object snapshots for the current desktop bridge", () => {
+    const harness = createBootstrapHarness();
+    const hostConfig = {
+      id: "workspace",
+      display_name: "Workspace",
+      kind: "git" as const,
+    };
+    const script = renderBootstrapScript({
+      hostConfig,
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    harness.run(script);
+
+    const bridge = harness.getElectronBridge();
+
+    expect(typeof bridge.getSharedObjectSnapshotValue).toBe("function");
+    expect(bridge.getSharedObjectSnapshotValue?.("host_config")).toEqual(hostConfig);
+    expect(bridge.getSharedObjectSnapshotValue?.("remote_connections")).toEqual([]);
   });
 
   it("offers reconnect and reload actions from the connection status overlay", async () => {
