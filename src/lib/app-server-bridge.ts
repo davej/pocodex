@@ -8,7 +8,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import { createInterface } from "node:readline";
 
 import { ensureCodexCliBinary } from "./codex-bundle.js";
-import { deriveCodexHomePath } from "./codex-home.js";
+import { deriveBrowserCodexHomePath, deriveCodexHomePath } from "./codex-home.js";
 import {
   DefaultCodexDesktopGitWorkerBridge,
   type CodexDesktopGitWorkerBridge,
@@ -166,6 +166,12 @@ interface GitRepositoryInfo {
   originUrl: string | null;
 }
 
+interface WorktreeDeleteRequest {
+  worktree: string;
+  reason?: string;
+  force?: boolean;
+  hostConfig: JsonRecord;
+}
 interface GitOriginsResponse {
   origins: GitOriginRecord[];
   homeDir: string;
@@ -291,6 +297,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
   private readonly codexHomePath: string;
+  private readonly browserCodexHomePath: string;
   private persistedAtomRegistryPath: string;
   private workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
@@ -301,6 +308,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private isClosing = false;
   private isInitialized = false;
   private childExited = false;
+  private readonly pocodexGitWorkerRequests = new Map<string, AbortController>();
   private connectionState: "connecting" | "connected" | "disconnected" = "connecting";
 
   override on(event: "bridge_message", listener: (message: unknown) => void): this;
@@ -318,6 +326,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
     this.codexHomePath = options.codexHomePath ?? deriveCodexHomePath();
+    this.browserCodexHomePath = options.codexHomePath ?? deriveBrowserCodexHomePath();
     this.persistedAtomRegistryPath =
       options.persistedAtomRegistryPath ?? derivePersistedAtomRegistryPath();
     this.workspaceRootRegistryPath =
@@ -375,6 +384,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.connectionState = "disconnected";
     this.fetchRequests.forEach((controller) => controller.abort());
     this.fetchRequests.clear();
+    this.pocodexGitWorkerRequests.forEach((controller) => controller.abort());
+    this.pocodexGitWorkerRequests.clear();
     this.terminalManager.dispose();
     await this.gitWorkerBridge.close().catch((error) => {
       debugLog("git-worker", "failed to close desktop git worker bridge", {
@@ -500,6 +511,12 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return;
       case "electron-rename-workspace-root-option":
         await this.handleRenameWorkspaceRootOption(message);
+        return;
+      case "pocodex-git-worker-request":
+        await this.handlePocodexGitWorkerRequest(message);
+        return;
+      case "pocodex-git-worker-cancel":
+        this.handlePocodexGitWorkerCancel(message);
         return;
       case "mcp-request":
         await this.handleMcpRequest(message as unknown as AppServerMcpRequestEnvelope);
@@ -1731,6 +1748,88 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     });
   }
 
+  private async handlePocodexGitWorkerRequest(message: JsonRecord): Promise<void> {
+    const requestId =
+      typeof message.requestId === "string" || typeof message.requestId === "number"
+        ? String(message.requestId)
+        : null;
+    const method = typeof message.method === "string" ? message.method : null;
+    if (
+      !requestId ||
+      !method ||
+      !["codex-worktrees", "resolve-worktree-for-thread", "delete-worktree"].includes(method)
+    ) {
+      return;
+    }
+
+    this.pocodexGitWorkerRequests.get(requestId)?.abort();
+    const controller = new AbortController();
+    this.pocodexGitWorkerRequests.set(requestId, controller);
+
+    try {
+      const value = await this.sendGitWorkerRequest(
+        method,
+        isJsonRecord(message.params) ? message.params : {},
+        controller.signal,
+      );
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      this.emitPocodexGitWorkerResponse({
+        id: requestId,
+        method,
+        result: {
+          type: "ok",
+          value,
+        },
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      this.emitPocodexGitWorkerResponse({
+        id: requestId,
+        method,
+        result: {
+          type: "error",
+          error: {
+            message: normalizeError(error).message,
+          },
+        },
+      });
+    } finally {
+      if (this.pocodexGitWorkerRequests.get(requestId) === controller) {
+        this.pocodexGitWorkerRequests.delete(requestId);
+      }
+    }
+  }
+
+  private handlePocodexGitWorkerCancel(message: JsonRecord): void {
+    const requestId =
+      typeof message.requestId === "string" || typeof message.requestId === "number"
+        ? String(message.requestId)
+        : null;
+    if (!requestId) {
+      return;
+    }
+
+    this.pocodexGitWorkerRequests.get(requestId)?.abort();
+    this.pocodexGitWorkerRequests.delete(requestId);
+  }
+
+  private emitPocodexGitWorkerResponse(response: JsonRecord): void {
+    this.emitBridgeMessage({
+      type: "pocodex-git-worker-response",
+      message: {
+        type: "worker-response",
+        workerId: "git",
+        response,
+      },
+    });
+  }
+
   private async handleCodexFetchRequest(
     rawUrl: string,
     method: string,
@@ -1740,6 +1839,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const url = new URL(rawUrl);
     const path = url.pathname.replace(/^\/+/, "");
     switch (path) {
+      case "worktree-delete":
+        try {
+          return {
+            status: 200,
+            body: await this.handleWorktreeDeleteRequest(body, signal),
+          };
+        } catch (error) {
+          return {
+            status: 500,
+            body: {
+              error: normalizeError(error).message,
+            },
+          };
+        }
       case "apply-patch":
         try {
           return {
@@ -1879,7 +1992,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return {
           status: 200,
           body: {
-            codexHome: this.codexHomePath,
+            codexHome: this.browserCodexHomePath,
           },
         };
       case "codex-agents-md":
@@ -2003,6 +2116,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
   }
 
+  private async handleWorktreeDeleteRequest(body: unknown, signal: AbortSignal): Promise<unknown> {
+    const request = readWorktreeDeleteRequest(body, this.buildHostConfig());
+    return await this.sendGitWorkerRequest("delete-worktree", request, signal);
+  }
   private async handleRelativeFetchRequest(
     request: RelativeFetchRequestContext,
   ): Promise<RelativeFetchResponse | null> {
@@ -3807,6 +3924,36 @@ async function runGitCommand(cwd: string, args: string[]): Promise<string> {
   });
 }
 
+function readWorktreeDeleteRequest(
+  body: unknown,
+  fallbackHostConfig: JsonRecord,
+): WorktreeDeleteRequest {
+  const params = readCodexFetchParams(body);
+  if (!isJsonRecord(params)) {
+    throw new Error("Worktree delete params are required.");
+  }
+
+  const worktree =
+    typeof params.worktree === "string"
+      ? params.worktree.trim()
+      : typeof params.worktreeGitRoot === "string"
+        ? params.worktreeGitRoot.trim()
+        : "";
+  if (worktree.length === 0) {
+    throw new Error("Worktree path is required.");
+  }
+
+  const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+  const shouldForce = params.force === true || reason.startsWith("settings-delete");
+  const hostConfig = isJsonRecord(params.hostConfig) ? params.hostConfig : fallbackHostConfig;
+
+  return {
+    worktree,
+    reason: reason.length > 0 ? reason : undefined,
+    force: shouldForce || undefined,
+    hostConfig,
+  };
+}
 async function execGhCommand(
   cwd: string,
   args: string[],

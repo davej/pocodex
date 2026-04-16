@@ -26,6 +26,7 @@ export const tempDirs: string[] = [];
 export const mockPtys: MockPty[] = [];
 const originalCodexHome = process.env.CODEX_HOME;
 const originalShell = process.env.SHELL;
+const originalUserProfile = process.env.USERPROFILE;
 const originalWslDistroName = process.env.WSL_DISTRO_NAME;
 const originalWslInterop = process.env.WSL_INTEROP;
 export const TEST_WORKSPACE_ROOT = process.cwd();
@@ -238,6 +239,11 @@ export function describeAppServerBridge(
         delete process.env.WSL_INTEROP;
       } else {
         process.env.WSL_INTEROP = originalWslInterop;
+      }
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
       }
       process.env.SHELL = originalShell;
       vi.clearAllMocks();

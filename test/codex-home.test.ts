@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { execFileSync } from "node:child_process";
 
-import { deriveCodexHomePath } from "../src/lib/codex-home.js";
+import { deriveBrowserCodexHomePath, deriveCodexHomePath } from "../src/lib/codex-home.js";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -60,6 +60,45 @@ describe("deriveCodexHomePath", () => {
     });
 
     expect(deriveCodexHomePath()).toBe("/mnt/c/Users/tester/.codex");
+  });
+});
+
+describe("deriveBrowserCodexHomePath", () => {
+  const originalCodexHome = process.env.CODEX_HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalWslDistroName = process.env.WSL_DISTRO_NAME;
+  const originalWslInterop = process.env.WSL_INTEROP;
+
+  afterEach(() => {
+    restoreEnv("CODEX_HOME", originalCodexHome);
+    restoreEnv("USERPROFILE", originalUserProfile);
+    restoreEnv("WSL_DISTRO_NAME", originalWslDistroName);
+    restoreEnv("WSL_INTEROP", originalWslInterop);
+  });
+
+  it("returns a shared browser codex home inside WSL", () => {
+    delete process.env.CODEX_HOME;
+    process.env.USERPROFILE = "/mnt/c/Users/tester";
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+
+    expect(deriveBrowserCodexHomePath()).toBe("/");
+  });
+
+  it("preserves the configured codex home inside WSL", () => {
+    process.env.CODEX_HOME = "/tmp/custom-codex-home";
+    process.env.USERPROFILE = "/mnt/c/Users/tester";
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+
+    expect(deriveBrowserCodexHomePath()).toBe("/tmp/custom-codex-home");
+  });
+
+  it("preserves the configured codex home outside WSL", () => {
+    process.env.CODEX_HOME = "/tmp/custom-codex-home";
+    delete process.env.USERPROFILE;
+    delete process.env.WSL_DISTRO_NAME;
+    delete process.env.WSL_INTEROP;
+
+    expect(deriveBrowserCodexHomePath()).toBe("/tmp/custom-codex-home");
   });
 });
 

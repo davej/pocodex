@@ -75,4 +75,46 @@ describe("request-id routing", () => {
       },
     });
   });
+
+  it("routes Pocodex git worker responses by nested worker response id", () => {
+    const routed = routeHostMessage({
+      type: "pocodex-git-worker-response",
+      message: {
+        type: "worker-response",
+        workerId: "git",
+        response: {
+          id: "pocodex:session-a:git-1",
+          method: "codex-worktrees",
+          result: {
+            type: "ok",
+            value: {
+              worktrees: [],
+            },
+          },
+        },
+      },
+    });
+
+    expect(routed).toEqual({
+      deliver: true,
+      sessionId: "session-a",
+      message: {
+        type: "pocodex-git-worker-response",
+        message: {
+          type: "worker-response",
+          workerId: "git",
+          response: {
+            id: "git-1",
+            method: "codex-worktrees",
+            result: {
+              type: "ok",
+              value: {
+                worktrees: [],
+              },
+            },
+          },
+        },
+      },
+    });
+  });
 });

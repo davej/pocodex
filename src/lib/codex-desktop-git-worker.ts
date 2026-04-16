@@ -3,11 +3,12 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import process from "node:process";
 import { Worker } from "node:worker_threads";
 
 import { ensureCodexDesktopWorkerScript, type CodexDesktopWorkerScript } from "./codex-bundle.js";
+import { listCodexHomePathCandidates } from "./codex-home.js";
 import { debugLog, isDebugEnabled } from "./debug.js";
 
 type GitWorkerMainRpcMethod =
@@ -209,6 +210,17 @@ interface PendingWorkerRequest {
   method: string;
 }
 
+interface CodexWorktreeRecord {
+  dir: string;
+  gitDir: string | null;
+}
+
+interface ResolveWorktreeForThreadResult {
+  worktreeGitRoot: string | null;
+  worktreeWorkspaceRoot: string | null;
+  hasUncommittedChanges: boolean;
+}
+
 interface CodexDesktopGitWorkerBridgeOptions {
   appPath: string;
   resolveWorkerScript?: () => Promise<CodexDesktopWorkerScript>;
@@ -227,6 +239,7 @@ export class DefaultCodexDesktopGitWorkerBridge
   private readonly pendingRequests = new Map<string, PendingWorkerRequest>();
   private readonly commandExecSessions = new Map<string, CommandExecSession>();
   private readonly localApplyPatchControllers = new Map<string, AbortController>();
+  private readonly localWorktreeRequestControllers = new Map<string, AbortController>();
   private worker: Worker | null = null;
   private workerStartPromise: Promise<Worker> | null = null;
   private subscriberCount = 0;
@@ -243,6 +256,7 @@ export class DefaultCodexDesktopGitWorkerBridge
 
   async send(message: unknown): Promise<void> {
     const request = parseGitWorkerRequest(message);
+    let outgoingMessage = message;
     if (request) {
       this.pendingRequests.set(String(request.id), request);
       if (request.method === "apply-patch") {
@@ -258,6 +272,22 @@ export class DefaultCodexDesktopGitWorkerBridge
         }
         return;
       }
+      if (request.method === "codex-worktrees" && shouldHandleWorktreeRequestLocally(message)) {
+        const controller = new AbortController();
+        this.localWorktreeRequestControllers.set(String(request.id), controller);
+        void this.handleLocalCodexWorktreesRequest(request, controller.signal);
+        return;
+      }
+      if (
+        request.method === "resolve-worktree-for-thread" &&
+        shouldHandleWorktreeRequestLocally(message)
+      ) {
+        const controller = new AbortController();
+        this.localWorktreeRequestControllers.set(String(request.id), controller);
+        void this.handleLocalResolveWorktreeForThreadRequest(request, message, controller.signal);
+        return;
+      }
+      outgoingMessage = maybeForceSettingsDeleteWorktreeRequest(message);
     } else {
       const cancellation = parseGitWorkerCancel(message);
       if (cancellation) {
@@ -268,12 +298,20 @@ export class DefaultCodexDesktopGitWorkerBridge
           localApplyPatch.abort();
           return;
         }
+        const localWorktreeRequest = this.localWorktreeRequestControllers.get(
+          String(cancellation.id),
+        );
+        if (localWorktreeRequest) {
+          this.localWorktreeRequestControllers.delete(String(cancellation.id));
+          localWorktreeRequest.abort();
+          return;
+        }
       }
     }
 
     try {
       const worker = await this.ensureWorker();
-      worker.postMessage(message);
+      worker.postMessage(outgoingMessage);
     } catch (error) {
       const normalized = normalizeError(error);
       debugLog("git-worker", "failed to send message", {
@@ -305,6 +343,7 @@ export class DefaultCodexDesktopGitWorkerBridge
     this.isClosing = true;
     this.disposeCommandExecSessions();
     this.disposeLocalApplyPatchRequests();
+    this.disposeLocalWorktreeRequests();
     const worker = this.worker;
     this.worker = null;
     this.workerStartPromise = null;
@@ -708,6 +747,59 @@ export class DefaultCodexDesktopGitWorkerBridge
       controller.abort();
     }
     this.localApplyPatchControllers.clear();
+  }
+
+  private async handleLocalCodexWorktreesRequest(
+    request: PendingWorkerRequest,
+    signal: AbortSignal,
+  ): Promise<void> {
+    try {
+      const value = {
+        worktrees: await listLocalCodexWorktrees(signal),
+      };
+      if (!signal.aborted) {
+        this.emit("message", buildWorkerSuccessResponse(request, value));
+      }
+    } catch (error) {
+      if (!signal.aborted) {
+        this.emit("message", buildWorkerErrorResponse(request, normalizeError(error)));
+      }
+    } finally {
+      this.pendingRequests.delete(String(request.id));
+      this.localWorktreeRequestControllers.delete(String(request.id));
+    }
+  }
+
+  private async handleLocalResolveWorktreeForThreadRequest(
+    request: PendingWorkerRequest,
+    message: unknown,
+    signal: AbortSignal,
+  ): Promise<void> {
+    try {
+      const params = parseResolveWorktreeForThreadParams(message);
+      const value = await resolveWorktreeForThreadLocally(
+        params.cwd,
+        params.conversationId,
+        signal,
+      );
+      if (!signal.aborted) {
+        this.emit("message", buildWorkerSuccessResponse(request, value));
+      }
+    } catch (error) {
+      if (!signal.aborted) {
+        this.emit("message", buildWorkerErrorResponse(request, normalizeError(error)));
+      }
+    } finally {
+      this.pendingRequests.delete(String(request.id));
+      this.localWorktreeRequestControllers.delete(String(request.id));
+    }
+  }
+
+  private disposeLocalWorktreeRequests(): void {
+    for (const controller of this.localWorktreeRequestControllers.values()) {
+      controller.abort();
+    }
+    this.localWorktreeRequestControllers.clear();
   }
 }
 
@@ -1835,6 +1927,316 @@ function stripOuterQuotes(value: string): string {
     return trimmed.slice(1, -1);
   }
   return trimmed;
+}
+
+function shouldHandleWorktreeRequestLocally(value: unknown): boolean {
+  return isLocalHostConfigValue(readGitWorkerRequestParams(value)?.hostConfig);
+}
+
+function maybeForceSettingsDeleteWorktreeRequest(value: unknown): unknown {
+  const envelope = isJsonRecord(value) ? value : null;
+  const params = readGitWorkerRequestParams(value);
+  if (!envelope || !params || !isLocalHostConfigValue(params.hostConfig)) {
+    return value;
+  }
+
+  const request = isJsonRecord(envelope.request) ? envelope.request : null;
+  if (request?.method !== "delete-worktree") {
+    return value;
+  }
+
+  const reason = typeof params.reason === "string" ? params.reason : "";
+  if (!reason.startsWith("settings-delete") || params.force === true) {
+    return value;
+  }
+
+  return {
+    ...envelope,
+    request: {
+      ...request,
+      params: {
+        ...params,
+        force: true,
+      },
+    },
+  };
+}
+
+function readGitWorkerRequestParams(value: unknown): Record<string, unknown> | null {
+  if (!isJsonRecord(value) || value.type !== "worker-request") {
+    return null;
+  }
+
+  const request = isJsonRecord(value.request) ? value.request : null;
+  if (!request) {
+    return null;
+  }
+
+  return isJsonRecord(request.params) ? request.params : {};
+}
+
+function isLocalHostConfigValue(value: unknown): boolean {
+  return (
+    !isJsonRecord(value) ||
+    value.kind === undefined ||
+    value.kind === "local" ||
+    value.kind === "git"
+  );
+}
+
+function parseResolveWorktreeForThreadParams(value: unknown): {
+  cwd: string;
+  conversationId: string;
+} {
+  const record = assertJsonRecord(
+    readGitWorkerRequestParams(value),
+    "resolve-worktree-for-thread params",
+  );
+  return {
+    cwd: readRequiredString(record.cwd, "cwd"),
+    conversationId: readRequiredString(record.conversationId, "conversationId"),
+  };
+}
+
+async function listLocalCodexWorktrees(signal: AbortSignal): Promise<CodexWorktreeRecord[]> {
+  const seenDirs = new Set<string>();
+  const worktrees: CodexWorktreeRecord[] = [];
+
+  for (const codexHome of listCodexHomePathCandidates()) {
+    for (const worktree of await listLocalCodexWorktreesForHome(codexHome, signal)) {
+      const key = normalizeComparablePath(worktree.dir);
+      if (seenDirs.has(key)) {
+        continue;
+      }
+      seenDirs.add(key);
+      worktrees.push(worktree);
+    }
+  }
+
+  worktrees.sort((left, right) => left.dir.localeCompare(right.dir));
+  return worktrees;
+}
+
+async function listLocalCodexWorktreesForHome(
+  codexHome: string,
+  signal: AbortSignal,
+): Promise<CodexWorktreeRecord[]> {
+  assertNotAborted(signal);
+
+  const worktreesRoot = join(codexHome, "worktrees");
+  let parentEntries;
+  try {
+    parentEntries = await readdir(worktreesRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const worktrees: CodexWorktreeRecord[] = [];
+  for (const parentEntry of parentEntries) {
+    assertNotAborted(signal);
+    if (!parentEntry.isDirectory()) {
+      continue;
+    }
+
+    const parentPath = join(worktreesRoot, parentEntry.name);
+    let worktreeEntries;
+    try {
+      worktreeEntries = await readdir(parentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const worktreeEntry of worktreeEntries) {
+      assertNotAborted(signal);
+      if (!worktreeEntry.isDirectory()) {
+        continue;
+      }
+
+      const worktreeDir = resolvePath(parentPath, worktreeEntry.name);
+      worktrees.push({
+        dir: worktreeDir,
+        gitDir: await resolveLocalGitDir(worktreeDir, signal),
+      });
+    }
+  }
+
+  return worktrees;
+}
+
+async function resolveWorktreeForThreadLocally(
+  cwd: string,
+  conversationId: string,
+  signal: AbortSignal,
+): Promise<ResolveWorktreeForThreadResult> {
+  const gitRoot = await resolveGitRoot(cwd, process.env, signal);
+  if (!gitRoot) {
+    return {
+      worktreeGitRoot: null,
+      worktreeWorkspaceRoot: null,
+      hasUncommittedChanges: false,
+    };
+  }
+
+  const relativeWorkspacePath = relative(gitRoot, cwd);
+  const worktreeRoots = await listGitWorktreeRoots(gitRoot, signal);
+  const codexWorktreesRootPrefixes = listCodexHomePathCandidates().map((codexHome) =>
+    normalizeComparablePath(join(codexHome, "worktrees")),
+  );
+  const candidates: Array<{
+    worktreeGitRoot: string;
+    worktreeWorkspaceRoot: string;
+    sortTimestamp: number;
+  }> = [];
+
+  for (const worktreeRoot of worktreeRoots) {
+    assertNotAborted(signal);
+    if (!isPathWithinAnyPrefix(worktreeRoot, codexWorktreesRootPrefixes)) {
+      continue;
+    }
+
+    const ownerThreadId = await readLocalWorktreeOwnerThreadId(worktreeRoot, signal);
+    if (ownerThreadId !== conversationId) {
+      continue;
+    }
+
+    const worktreeWorkspaceRoot = isNestedRelativePath(relativeWorkspacePath)
+      ? resolvePath(worktreeRoot, relativeWorkspacePath)
+      : worktreeRoot;
+    candidates.push({
+      worktreeGitRoot: worktreeRoot,
+      worktreeWorkspaceRoot,
+      sortTimestamp: await readSortTimestamp(worktreeRoot),
+    });
+  }
+
+  if (candidates.length === 0) {
+    return {
+      worktreeGitRoot: null,
+      worktreeWorkspaceRoot: null,
+      hasUncommittedChanges: false,
+    };
+  }
+
+  candidates.sort((left, right) => {
+    if (left.sortTimestamp === right.sortTimestamp) {
+      return right.worktreeGitRoot.localeCompare(left.worktreeGitRoot);
+    }
+    return right.sortTimestamp - left.sortTimestamp;
+  });
+
+  const selected = candidates[0]!;
+  const status = await runGitCommand(selected.worktreeWorkspaceRoot, ["status", "--porcelain"], {
+    env: process.env,
+    signal,
+    allowedNonZeroExitCodes: [128],
+  });
+  return {
+    worktreeGitRoot: selected.worktreeGitRoot,
+    worktreeWorkspaceRoot: selected.worktreeWorkspaceRoot,
+    hasUncommittedChanges: status.success && status.stdout.length > 0,
+  };
+}
+
+async function listGitWorktreeRoots(gitRoot: string, signal: AbortSignal): Promise<string[]> {
+  const output = await runGitCommand(gitRoot, ["worktree", "list", "--porcelain"], {
+    env: process.env,
+    signal,
+  });
+  if (!output.success) {
+    throw new Error(output.stderr || output.stdout || "Failed to list git worktrees.");
+  }
+
+  const roots = new Set<string>();
+  for (const line of output.stdout.split(/\r?\n/)) {
+    if (!line.startsWith("worktree ")) {
+      continue;
+    }
+    const worktreeRoot = line.slice("worktree ".length).trim();
+    if (worktreeRoot.length === 0) {
+      continue;
+    }
+    roots.add(resolvePath(worktreeRoot));
+  }
+  return [...roots];
+}
+
+async function readLocalWorktreeOwnerThreadId(
+  worktreeRoot: string,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const configPath = await resolveLocalGitPath(worktreeRoot, "codex-thread.json", signal);
+  if (!configPath) {
+    return null;
+  }
+
+  try {
+    const rawConfig = await readFile(configPath, "utf8");
+    const parsed = JSON.parse(rawConfig);
+    return typeof parsed?.ownerThreadId === "string" ? parsed.ownerThreadId : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveLocalGitDir(
+  worktreeRoot: string,
+  signal: AbortSignal,
+): Promise<string | null> {
+  return resolveLocalGitPath(worktreeRoot, ".git", signal, ["rev-parse", "--git-dir"]);
+}
+
+async function resolveLocalGitPath(
+  worktreeRoot: string,
+  gitPath: string,
+  signal: AbortSignal,
+  command: string[] = ["rev-parse", "--git-path", gitPath],
+): Promise<string | null> {
+  const result = await runGitCommand(worktreeRoot, command, {
+    env: process.env,
+    signal,
+    allowedNonZeroExitCodes: [128],
+  });
+  if (!result.success || result.stdout.length === 0) {
+    return null;
+  }
+
+  return isAbsolute(result.stdout) ? result.stdout : resolvePath(worktreeRoot, result.stdout);
+}
+
+async function readSortTimestamp(path: string): Promise<number> {
+  try {
+    const stats = await stat(path);
+    if (stats.birthtimeMs > 0) {
+      return Math.floor(stats.birthtimeMs);
+    }
+    return Math.floor(stats.mtimeMs);
+  } catch {
+    return 0;
+  }
+}
+
+function isPathWithinAnyPrefix(path: string, prefixes: string[]): boolean {
+  const normalizedPath = normalizeComparablePath(path);
+  return prefixes.some((prefix) => {
+    if (normalizedPath === prefix) {
+      return true;
+    }
+    return normalizedPath.startsWith(`${prefix}/`);
+  });
+}
+
+function isNestedRelativePath(value: string): boolean {
+  return value.length > 0 && !isAbsolute(value) && !/^\.\.(?:[\\/]|$)/.test(value);
+}
+
+function normalizeComparablePath(value: string): string {
+  return resolvePath(value).replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function assertNotAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw new Error("Operation canceled");
+  }
 }
 
 function parseWorktreeCleanupInputs(value: unknown): WorktreeCleanupInputs {

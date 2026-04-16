@@ -131,6 +131,33 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("reports a shared browser codex home inside WSL", async () => {
+    delete process.env.CODEX_HOME;
+    process.env.USERPROFILE = "/mnt/c/Users/tester";
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-home",
+      method: "POST",
+      url: "vscode://codex/codex-home",
+    });
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-home")));
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-home")).toEqual({
+      codexHome: "/",
+    });
+
+    await bridge.close();
+  });
+
   it("generates thread titles for host fetch requests", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];

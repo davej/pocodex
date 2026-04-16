@@ -112,6 +112,32 @@ export function routeHostMessage(message: unknown): HostMessageRouteResult {
     };
   }
 
+  if (
+    message.type === "pocodex-git-worker-response" &&
+    isJsonRecord(message.message) &&
+    isJsonRecord(message.message.response) &&
+    typeof message.message.response.id === "string"
+  ) {
+    const parsed = stripPrefixedRequestId(message.message.response.id);
+    if (!parsed) {
+      return { deliver: false };
+    }
+    return {
+      deliver: true,
+      sessionId: parsed.sessionId,
+      message: {
+        ...message,
+        message: {
+          ...message.message,
+          response: {
+            ...message.message.response,
+            id: parsed.requestId,
+          },
+        },
+      },
+    };
+  }
+
   return {
     deliver: true,
     message,

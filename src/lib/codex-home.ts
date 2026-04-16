@@ -7,6 +7,22 @@ export function deriveCodexHomePath(): string {
   return listCodexHomePathCandidates()[0] ?? join(homedir(), ".codex");
 }
 
+export function deriveBrowserCodexHomePath(): string {
+  const configuredCodexHome = normalizeEnvironmentPath(process.env.CODEX_HOME);
+  if (configuredCodexHome) {
+    return configuredCodexHome;
+  }
+
+  if (!isRunningInWsl()) {
+    return join(homedir(), ".codex");
+  }
+
+  // The desktop bundle assumes a single Codex home when filtering local threads.
+  // In WSL we may surface sessions from both the Windows and Linux homes, so report
+  // their shared ancestor to keep both sets visible in browser-side path checks.
+  return deriveSharedAncestorPath(listCodexHomePathCandidates()) ?? deriveCodexHomePath();
+}
+
 export function listCodexHomePathCandidates(): string[] {
   const candidates: string[] = [];
   addPathCandidate(candidates, normalizeEnvironmentPath(process.env.CODEX_HOME));
@@ -85,6 +101,64 @@ function addPathCandidate(candidates: string[], candidate: string | null): void 
   }
 
   candidates.push(candidate);
+}
+
+function deriveSharedAncestorPath(paths: string[]): string | null {
+  const normalizedPaths = paths
+    .map((path) => normalizeSharedAncestorPath(path))
+    .filter((path): path is string => path.length > 0);
+  const [firstPath, ...remainingPaths] = normalizedPaths;
+  if (!firstPath) {
+    return null;
+  }
+
+  let sharedPath: string | null = firstPath;
+  for (const path of remainingPaths) {
+    sharedPath = deriveCommonAncestorPath(sharedPath, path);
+    if (!sharedPath) {
+      return null;
+    }
+  }
+
+  return sharedPath;
+}
+
+function normalizeSharedAncestorPath(path: string): string {
+  const normalizedPath = path.replaceAll("\\", "/");
+  if (normalizedPath.length <= 1) {
+    return normalizedPath;
+  }
+
+  return normalizedPath.replace(/\/+$/, "");
+}
+
+function deriveCommonAncestorPath(leftPath: string, rightPath: string): string | null {
+  const leftIsAbsolute = leftPath.startsWith("/");
+  if (leftIsAbsolute !== rightPath.startsWith("/")) {
+    return null;
+  }
+
+  const leftSegments = leftPath.split("/").filter((segment) => segment.length > 0);
+  const rightSegments = rightPath.split("/").filter((segment) => segment.length > 0);
+  const sharedSegmentCount = Math.min(leftSegments.length, rightSegments.length);
+  let segmentIndex = 0;
+  while (
+    segmentIndex < sharedSegmentCount &&
+    leftSegments[segmentIndex] === rightSegments[segmentIndex]
+  ) {
+    segmentIndex += 1;
+  }
+
+  if (leftIsAbsolute) {
+    return segmentIndex === 0 ? "/" : `/${leftSegments.slice(0, segmentIndex).join("/")}`;
+  }
+
+  if (segmentIndex === 0) {
+    return null;
+  }
+
+  const sharedRelativePath = leftSegments.slice(0, segmentIndex).join("/");
+  return /^[A-Za-z]:$/u.test(sharedRelativePath) ? `${sharedRelativePath}/` : sharedRelativePath;
 }
 
 function resolveWslWindowsUserProfile(): string | null {
