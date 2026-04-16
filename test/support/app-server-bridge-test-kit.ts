@@ -251,6 +251,11 @@ export async function createBridge(
   children: MockChildProcess[],
   options: {
     codexHomePath?: string;
+    extensionInfo?: {
+      version: string;
+      buildFlavor: string;
+      buildNumber: string;
+    };
     persistedAtomRegistryPath?: string;
     workspaceRootRegistryPath?: string;
     gitWorkerBridge?: FakeGitWorkerBridge;
@@ -281,6 +286,7 @@ export async function createBridge(
     codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
     codexHomePath: options.codexHomePath,
+    extensionInfo: options.extensionInfo,
     persistedAtomRegistryPath: options.persistedAtomRegistryPath,
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,

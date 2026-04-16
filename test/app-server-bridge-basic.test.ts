@@ -89,6 +89,46 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("uses the configured Codex bundle metadata for extension info", async () => {
+    const bridge = await createBridge(children, {
+      extensionInfo: {
+        version: "26.409.61251",
+        buildFlavor: "prod",
+        buildNumber: "1555",
+      },
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    const child = children.at(0);
+    expect(child?.writes ?? "").toContain('"version":"26.409.61251"');
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-extension-info",
+      method: "POST",
+      url: "vscode://codex/extension-info",
+    });
+
+    await waitForCondition(() =>
+      emittedMessages.some(
+        (message) =>
+          isBridgeMessage(message, "fetch-response") &&
+          message.requestId === "fetch-extension-info",
+      ),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-extension-info")).toEqual({
+      version: "26.409.61251",
+      buildFlavor: "prod",
+      buildNumber: "1555",
+    });
+
+    await bridge.close();
+  });
+
   it("passes the resolved codex home through to the spawned app-server", async () => {
     const codexHomePath = join(tmpdir(), "pocodex-custom-codex-home");
     const bridge = await createBridge(children, {

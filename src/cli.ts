@@ -7,7 +7,11 @@ import { basename, dirname } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { AppServerBridge } from "./lib/app-server-bridge.js";
+import {
+  AppServerBridge,
+  buildLocalHostConfig,
+  resolveLocalHostKind,
+} from "./lib/app-server-bridge.js";
 import { normalizeCliArgv } from "./lib/cli-args.js";
 import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
 import { renderBootstrapScript } from "./lib/bootstrap-script.js";
@@ -64,9 +68,16 @@ async function main(): Promise<void> {
     buildFlavor: bundle.buildFlavor,
     buildNumber: bundle.buildNumber,
   }).catch(() => null);
+  const hostKind = await resolveLocalHostKind(process.cwd());
   const relay = await AppServerBridge.connect({
     appPath: options.appPath,
     cwd: process.cwd(),
+    extensionInfo: {
+      version: bundle.version,
+      buildFlavor: bundle.buildFlavor,
+      buildNumber: bundle.buildNumber,
+    },
+    hostKind,
   });
 
   const sentryOptions: SentryInitOptions = {
@@ -97,6 +108,7 @@ async function main(): Promise<void> {
       return patchIndexHtml(indexHtml, {
         bootstrapScript: renderBootstrapScript({
           devMode: options.devMode,
+          hostConfig: buildLocalHostConfig("local", hostKind),
           sentryOptions,
           stylesheetHref: POCODEX_STYLESHEET_HREF,
           importIconSvg: await readFile(importIconSvgPath, "utf8"),

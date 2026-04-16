@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import process from "node:process";
 import { Worker } from "node:worker_threads";
@@ -11,6 +11,7 @@ import { ensureCodexDesktopWorkerScript, type CodexDesktopWorkerScript } from ".
 import { debugLog, isDebugEnabled } from "./debug.js";
 
 type GitWorkerMainRpcMethod =
+  | "platform-family"
   | "worktree-cleanup-inputs"
   | "fs-read-file"
   | "fs-write-file"
@@ -408,6 +409,10 @@ export class DefaultCodexDesktopGitWorkerBridge
 
     try {
       switch (message.method as GitWorkerMainRpcMethod) {
+        case "platform-family": {
+          postMainRpcSuccess(worker, message, platform() === "win32" ? "windows" : "unix");
+          return;
+        }
         case "worktree-cleanup-inputs": {
           const params = parseWorktreeCleanupInputs(message.params);
           postMainRpcSuccess(worker, message, {

@@ -7,6 +7,11 @@ import { serializeInlineScript } from "./inline-script.js";
 
 export interface BootstrapScriptConfig {
   devMode?: boolean;
+  hostConfig?: {
+    id: string;
+    display_name: string;
+    kind: "git" | "local";
+  };
   sentryOptions: SentryInitOptions;
   stylesheetHref: string;
   importIconSvg?: string;
@@ -99,6 +104,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     windowType: "electron";
     sendMessageFromView(message: unknown): Promise<void>;
     getPathForFile(): null;
+    getSharedObjectSnapshotValue?(key: string): unknown;
     sendWorkerMessageFromView(workerName: string, message: unknown): Promise<void>;
     subscribeToWorkerMessages(workerName: string, callback: WorkerMessageListener): () => void;
     showContextMenu(): Promise<void>;
@@ -146,6 +152,17 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   const workerSubscribers = new Map<string, Set<WorkerMessageListener>>();
   const restorableTerminalAttachments = new Map<string, RestorableTerminalAttachment>();
+  const sharedObjectSnapshots = new Map<string, unknown>([
+    [
+      "host_config",
+      config.hostConfig ?? {
+        id: LOCAL_HOST_ID,
+        display_name: "Local",
+        kind: "local",
+      },
+    ],
+    ["remote_connections", []],
+  ]);
   const pendingMessages: string[] = [];
   const toastHost = document.createElement("div");
   const statusHost = document.createElement("div");
@@ -2323,9 +2340,20 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     const overriddenMessage = overrideEnterBehaviorInMessage(message);
     rememberDispatchedEnterBehavior(overriddenMessage);
     syncSidebarModeWithBridgeMessage(overriddenMessage);
+    if (isRecord(overriddenMessage)) {
+      rememberSharedObjectSnapshot(overriddenMessage);
+    }
     syncThreadQueryWithBridgeMessage(overriddenMessage);
     syncRestorableTerminalAttachments(overriddenMessage, "incoming");
     return overriddenMessage;
+  }
+
+  function rememberSharedObjectSnapshot(message: Record<string, unknown>): void {
+    if (message.type !== "shared-object-updated" || typeof message.key !== "string") {
+      return;
+    }
+
+    sharedObjectSnapshots.set(message.key, message.value ?? null);
   }
 
   function overrideEnterBehaviorInMessage(message: Record<string, unknown>): unknown {
@@ -3518,6 +3546,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       }
     },
     getPathForFile: () => null,
+    getSharedObjectSnapshotValue: (key) => sharedObjectSnapshots.get(key) ?? null,
     sendWorkerMessageFromView: async (workerName, message) => {
       sendEnvelope({ type: "worker_message", workerName, message });
     },
