@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 
 import { AppServerBridge } from "./app-server-bridge.js";
 import { renderBootstrapScript } from "./bootstrap-script.js";
+import { readCodexAuthState } from "./codex-auth.js";
 import { loadCodexBundle } from "./codex-bundle.js";
 import { patchIndexHtml } from "./html-patcher.js";
 import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from "./pwa.js";
@@ -156,6 +157,11 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
       relay = await AppServerBridge.connect({
         appPath: this.options.appPath,
         cwd: this.options.cwd,
+        extensionInfo: {
+          version: bundle.version,
+          buildFlavor: bundle.buildFlavor,
+          buildNumber: bundle.buildNumber,
+        },
       });
 
       relayErrorListener = (error) => {
@@ -178,6 +184,7 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
         manifestPath: POCODEX_MANIFEST_HREF,
         iconHref: bundle.faviconHref,
       };
+      const authState = await readCodexAuthState();
 
       server = new PocodexServer({
         listenHost: this.options.listenHost,
@@ -190,6 +197,7 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
           const indexHtml = await bundle.readIndexHtml();
           return patchIndexHtml(indexHtml, {
             bootstrapScript: renderBootstrapScript({
+              authState,
               devMode: this.options.devMode,
               sentryOptions,
               stylesheetHref: POCODEX_STYLESHEET_HREF,

@@ -45,12 +45,19 @@ import {
 interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
+  extensionInfo?: AppExtensionInfo;
   hostId?: string;
   codexHomePath?: string;
   persistedAtomRegistryPath?: string;
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
   codexCliPath?: string;
+}
+
+interface AppExtensionInfo {
+  version: string;
+  buildFlavor: string;
+  buildNumber: string;
 }
 
 interface WhamUsageCredits {
@@ -271,6 +278,7 @@ const LOCAL_UNSUPPORTED_FETCH_BODY = {
 
 export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly child: ChildProcessWithoutNullStreams;
+  private readonly extensionInfo: AppExtensionInfo;
   private readonly hostId: string;
   private readonly cwd: string;
   private readonly terminalManager: TerminalSessionManager;
@@ -315,6 +323,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
   private constructor(options: AppServerBridgeOptions) {
     super();
+    this.extensionInfo = options.extensionInfo ?? {
+      version: "0.1.0",
+      buildFlavor: "pocodex",
+      buildNumber: "0",
+    };
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
     this.codexHomePath = options.codexHomePath ?? deriveCodexHomePath();
@@ -821,7 +834,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       clientInfo: {
         name: "pocodex",
         title: "Pocodex",
-        version: "0.1.0",
+        version: this.extensionInfo.version,
       },
       capabilities: {
         experimentalApi: true,
@@ -1811,11 +1824,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "extension-info":
         return {
           status: 200,
-          body: {
-            version: "0.1.0",
-            buildFlavor: "pocodex",
-            buildNumber: "0",
-          },
+          body: this.extensionInfo,
         };
       case "is-copilot-api-available":
         return {

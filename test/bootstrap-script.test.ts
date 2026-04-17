@@ -754,9 +754,11 @@ function createBootstrapHarness(
     },
     getElectronBridge(): {
       sendMessageFromView: (message: unknown) => Promise<void>;
+      getSharedObjectSnapshotValue?: (key: string) => unknown;
     } {
       return Reflect.get(windowObject, "electronBridge") as {
         sendMessageFromView: (message: unknown) => Promise<void>;
+        getSharedObjectSnapshotValue?: (key: string) => unknown;
       };
     },
     emitServerEnvelope(envelope: unknown): void {
@@ -927,6 +929,38 @@ describe("renderBootstrapScript", () => {
 
     harness.windowObject.history.replaceState(null, "", "/");
     expect(harness.document.documentElement.dataset.pocodexRoute).toBe("/");
+  });
+
+  it("seeds browser shared-object snapshots for auth state", () => {
+    const harness = createBootstrapHarness();
+    const authState = {
+      accountId: "account-123",
+      email: "dev@example.com",
+      userId: "user-123",
+    };
+    const script = renderBootstrapScript({
+      authState,
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    harness.run(script);
+
+    const bridge = harness.getElectronBridge();
+    expect(typeof bridge.getSharedObjectSnapshotValue).toBe("function");
+    expect(bridge.getSharedObjectSnapshotValue?.("host_config")).toEqual({
+      id: "local",
+      display_name: "Local",
+      kind: "local",
+    });
+    expect(bridge.getSharedObjectSnapshotValue?.("pocodex_auth_state")).toEqual(authState);
+    expect(bridge.getSharedObjectSnapshotValue?.("remote_connections")).toEqual([]);
   });
 
   it("marks the document when the settings shell is present", () => {

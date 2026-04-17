@@ -107,7 +107,11 @@ describe("codex-bundle", () => {
     await mkdir(join(versionCacheRoot, "__cli", "windows-app"), { recursive: true });
     await writeFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "cached", "utf8");
 
-    asarMock.listPackage.mockReturnValue(["/webview/index.html", "/webview/assets/app-test.png"]);
+    asarMock.listPackage.mockReturnValue([
+      "/webview/index.html",
+      "/webview/assets/app-test.png",
+      "/webview/assets/use-auth-test.js",
+    ]);
     asarMock.statFile.mockReturnValue({ size: 1 });
     asarMock.extractFile.mockImplementation((_appAsarPath, filename) => {
       if (filename === "package.json") {
@@ -126,6 +130,12 @@ describe("codex-bundle", () => {
       if (filename === "webview/assets/app-test.png") {
         return Buffer.from("png");
       }
+      if (filename === "webview/assets/use-auth-test.js") {
+        return Buffer.from(
+          "function T(){let e=(0,p.useContext)(m);if(!e)throw Error(`useAuth must be used within AuthProvider`);return e}function E(e){return D(s(e))}const auth={accountId:null,userId:null};",
+          "utf8",
+        );
+      }
 
       throw new Error(`Unexpected asar extract for ${filename}`);
     });
@@ -136,8 +146,54 @@ describe("codex-bundle", () => {
     expect(bundle.faviconHref).toBe("./assets/app-test.png");
     await expect(bundle.readIndexHtml()).resolves.toBe("<html>codex</html>");
     await expect(
+      readFile(join(bundle.webviewRoot, "assets", "use-auth-test.js"), "utf8"),
+    ).resolves.toContain(
+      'window.electronBridge?.getSharedObjectSnapshotValue?.("pocodex_auth_state")',
+    );
+    await expect(
+      readFile(join(bundle.webviewRoot, "assets", "use-auth-test.js"), "utf8"),
+    ).resolves.toContain("email:e.email??t.email??null");
+    await expect(
       readFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "utf8"),
     ).resolves.toBe("cached");
+  });
+
+  it("patches an existing cached webview before serving it", async () => {
+    const homeDirectory = await mkdtemp(join(tmpdir(), "pocodex-home-"));
+    tempDirs.push(homeDirectory);
+    process.env.HOME = homeDirectory;
+
+    const appPath = await createWindowsInstallLayout();
+    const webviewRoot = join(
+      homeDirectory,
+      ".cache",
+      "pocodex",
+      "26.313.5234.0__prod__5234",
+      "__webview",
+    );
+    await mkdir(join(webviewRoot, "assets"), { recursive: true });
+    await writeFile(join(webviewRoot, ".complete"), "ok", "utf8");
+    await writeFile(join(webviewRoot, "index.html"), "<html>cached</html>", "utf8");
+    await writeFile(
+      join(webviewRoot, "assets", "use-auth-test.js"),
+      "function T(){let e=(0,p.useContext)(m);if(!e)throw Error(`useAuth must be used within AuthProvider`);return e}function E(e){return D(s(e))}const auth={accountId:null,userId:null};",
+      "utf8",
+    );
+
+    const bundle = await loadCodexBundle(appPath);
+
+    expect(bundle.webviewRoot).toBe(webviewRoot);
+    await expect(
+      readFile(join(webviewRoot, "assets", "use-auth-test.js"), "utf8"),
+    ).resolves.toContain(
+      'window.electronBridge?.getSharedObjectSnapshotValue?.("pocodex_auth_state")',
+    );
+    await expect(
+      readFile(join(webviewRoot, "assets", "use-auth-test.js"), "utf8"),
+    ).resolves.toContain("email:e.email??t.email??null");
+    await expect(readFile(join(webviewRoot, ".pocodex-webview-patches-v1"), "utf8")).resolves.toBe(
+      "ok",
+    );
   });
 
   it("separates cached artifacts for builds that share a version string", async () => {

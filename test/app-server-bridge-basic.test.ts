@@ -105,6 +105,44 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("reports the desktop bundle extension info to the app-server", async () => {
+    const bridge = await createBridge(children, {
+      extensionInfo: {
+        version: "26.415.20818",
+        buildFlavor: "prod",
+        buildNumber: "1727",
+      },
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "ready",
+    });
+
+    const child = children.at(0);
+    const written = child?.writes ?? "";
+    expect(written).toContain('"version":"26.415.20818"');
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "extension-info",
+      method: "GET",
+      url: "vscode://codex/extension-info",
+    });
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "extension-info")));
+
+    expect(getFetchJsonBody(emittedMessages, "extension-info")).toEqual({
+      version: "26.415.20818",
+      buildFlavor: "prod",
+      buildNumber: "1727",
+    });
+
+    await bridge.close();
+  });
+
   it("rebroadcasts thread stream state changes back to the browser", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];

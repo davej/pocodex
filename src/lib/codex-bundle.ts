@@ -71,6 +71,7 @@ const execFileAsync = promisify(execFile);
 export async function loadCodexBundle(appPath: string): Promise<CodexBundle> {
   const metadata = await loadCodexDesktopMetadata(appPath);
   const webviewRoot = await ensureWebviewCache(metadata);
+  await ensurePocodexWebviewPatches(webviewRoot);
   const faviconHref = await resolveWebviewFaviconHref(webviewRoot);
 
   return {
@@ -281,6 +282,58 @@ async function ensureDesktopWorkerCache(metadata: CodexDesktopMetadata): Promise
   }
 
   return workerPath;
+}
+
+async function ensurePocodexWebviewPatches(webviewRoot: string): Promise<void> {
+  const markerPath = join(webviewRoot, ".pocodex-webview-patches-v1");
+  try {
+    await stat(markerPath);
+    return;
+  } catch {
+    // Continue and apply the current patch set.
+  }
+
+  await patchUseAuthBundle(webviewRoot);
+  await writeFile(markerPath, "ok");
+}
+
+async function patchUseAuthBundle(webviewRoot: string): Promise<void> {
+  const assetsDirectory = join(webviewRoot, "assets");
+  const entries = await readdir(assetsDirectory, { withFileTypes: true }).catch(() => []);
+
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && /^use-auth-.*\.js$/i.test(entry.name))
+      .map(async (entry) => {
+        const assetPath = join(assetsDirectory, entry.name);
+        const source = await readFile(assetPath, "utf8");
+        const patched = patchUseAuthBundleSource(source);
+        if (patched !== source) {
+          await writeFile(assetPath, patched, "utf8");
+        }
+      }),
+  );
+}
+
+function patchUseAuthBundleSource(source: string): string {
+  const snapshotGetter =
+    'window.electronBridge?.getSharedObjectSnapshotValue?.("pocodex_auth_state")';
+  const patchedHookSnippet = `accountId:${snapshotGetter}?.accountId??null,userId:${snapshotGetter}?.userId??null`;
+  const patchedContextReturn = `let t=${snapshotGetter}??null;return t&&typeof t===\`object\`?{...e,accountId:e.accountId??t.accountId??null,email:e.email??t.email??null,userId:e.userId??t.userId??null}:e}`;
+  if (source.includes(patchedHookSnippet) && source.includes(patchedContextReturn)) {
+    return source;
+  }
+
+  let patched = source.replace("accountId:null,userId:null", patchedHookSnippet);
+  patched = patched.replace(
+    "return e}function E(e){return D(s(e))}",
+    `${patchedContextReturn}function E(e){return D(s(e))}`,
+  );
+  patched = patched.replace(
+    "return e}function w(e){return T(s(e))}",
+    `${patchedContextReturn}function w(e){return T(s(e))}`,
+  );
+  return patched;
 }
 
 async function resolveWebviewFaviconHref(webviewRoot: string): Promise<string | null> {

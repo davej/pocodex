@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { AppServerBridge } from "./lib/app-server-bridge.js";
 import { normalizeCliArgv } from "./lib/cli-args.js";
+import { readCodexAuthState } from "./lib/codex-auth.js";
 import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
 import { renderBootstrapScript } from "./lib/bootstrap-script.js";
 import { patchIndexHtml } from "./lib/html-patcher.js";
@@ -67,6 +68,11 @@ async function main(): Promise<void> {
   const relay = await AppServerBridge.connect({
     appPath: options.appPath,
     cwd: process.cwd(),
+    extensionInfo: {
+      version: bundle.version,
+      buildFlavor: bundle.buildFlavor,
+      buildNumber: bundle.buildNumber,
+    },
   });
 
   const sentryOptions: SentryInitOptions = {
@@ -84,6 +90,7 @@ async function main(): Promise<void> {
     manifestPath: POCODEX_MANIFEST_HREF,
     iconHref: bundle.faviconHref,
   };
+  const authState = await readCodexAuthState();
 
   const server = new PocodexServer({
     listenHost: options.listenHost,
@@ -96,6 +103,7 @@ async function main(): Promise<void> {
       const indexHtml = await bundle.readIndexHtml();
       return patchIndexHtml(indexHtml, {
         bootstrapScript: renderBootstrapScript({
+          authState,
           devMode: options.devMode,
           sentryOptions,
           stylesheetHref: POCODEX_STYLESHEET_HREF,
