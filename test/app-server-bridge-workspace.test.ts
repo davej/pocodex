@@ -155,6 +155,139 @@ describeAppServerBridge(({ children }) => {
     await secondBridge.close();
   });
 
+  it("lists workspace directory entries for the local workspace browser", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-browser-"));
+    tempDirs.push(tempDirectory);
+    const emptyDirectory = join(tempDirectory, "empty-dir");
+    const sourceDirectory = join(tempDirectory, "src");
+    await mkdir(emptyDirectory, { recursive: true });
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(join(tempDirectory, "README.md"), "fixture\n", "utf8");
+    await writeFile(join(tempDirectory, ".env"), "SECRET=value\n", "utf8");
+    await writeFile(join(sourceDirectory, "index.ts"), "export {};\n", "utf8");
+    await writeFile(join(sourceDirectory, ".secret.ts"), "export const hidden = true;\n", "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-workspace-directory-root",
+      method: "POST",
+      url: "vscode://codex/workspace-directory-entries",
+      body: JSON.stringify({
+        params: {
+          workspaceRoot: tempDirectory,
+          includeHidden: false,
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-workspace-directory-nested",
+      method: "POST",
+      url: "vscode://codex/workspace-directory-entries",
+      body: JSON.stringify({
+        params: {
+          workspaceRoot: tempDirectory,
+          directoryPath: "src",
+          includeHidden: true,
+        },
+      }),
+    });
+
+    await waitForCondition(
+      () =>
+        Boolean(getFetchResponse(emittedMessages, "fetch-workspace-directory-root")) &&
+        Boolean(getFetchResponse(emittedMessages, "fetch-workspace-directory-nested")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-workspace-directory-root")).toEqual({
+      directoryPath: "",
+      entries: [
+        {
+          name: "empty-dir",
+          path: "empty-dir",
+          type: "directory",
+        },
+        {
+          name: "src",
+          path: "src",
+          type: "directory",
+        },
+        {
+          name: "README.md",
+          path: "README.md",
+          type: "file",
+        },
+      ],
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-workspace-directory-nested")).toEqual({
+      directoryPath: "src",
+      entries: [
+        {
+          name: "index.ts",
+          path: "src/index.ts",
+          type: "file",
+        },
+        {
+          name: ".secret.ts",
+          path: "src/.secret.ts",
+          type: "file",
+        },
+      ],
+    });
+
+    await bridge.close();
+  });
+
+  it("rejects workspace directory requests outside the selected workspace root", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-browser-"));
+    tempDirs.push(tempDirectory);
+    const sourceDirectory = join(tempDirectory, "src");
+    await mkdir(sourceDirectory, { recursive: true });
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-workspace-directory-outside-root",
+      method: "POST",
+      url: "vscode://codex/workspace-directory-entries",
+      body: JSON.stringify({
+        params: {
+          workspaceRoot: sourceDirectory,
+          directoryPath: dirname(tempDirectory),
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-workspace-directory-outside-root")),
+    );
+
+    expect(
+      getFetchResponse(emittedMessages, "fetch-workspace-directory-outside-root"),
+    ).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-workspace-directory-outside-root",
+      responseType: "error",
+      status: 400,
+      error: "Directory path must stay within the selected workspace root.",
+    });
+
+    await bridge.close();
+  });
+
   it("persists host persisted atoms across restarts", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-persisted-atoms-"));
     tempDirs.push(tempDirectory);

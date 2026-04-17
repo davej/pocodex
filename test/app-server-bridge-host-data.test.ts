@@ -338,6 +338,44 @@ description: Review lint issues quickly.
     await bridge.close();
   });
 
+  it("reads file metadata through the webview contract", async () => {
+    const skillDirectory = await mkdtemp(join(tmpdir(), "pocodex-skill-"));
+    tempDirs.push(skillDirectory);
+    const skillPath = join(skillDirectory, "SKILL.md");
+    const skillContents = "# Demo Skill\n\nUse concise output.\n";
+    await writeFile(skillPath, skillContents, "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-read-file-metadata",
+      method: "POST",
+      url: "vscode://codex/read-file-metadata",
+      body: JSON.stringify({
+        params: {
+          path: skillPath,
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-read-file-metadata")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-read-file-metadata")).toEqual({
+      path: skillPath,
+      isFile: true,
+      sizeBytes: Buffer.byteLength(skillContents, "utf8"),
+    });
+
+    await bridge.close();
+  });
+
   it("returns a fetch error for invalid read-file paths", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];

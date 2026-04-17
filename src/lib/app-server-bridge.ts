@@ -1039,6 +1039,122 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     };
   }
 
+  private async listWorkspaceDirectoryEntries(body: unknown): Promise<{
+    directoryPath: string;
+    entries: Array<{
+      name: string;
+      path: string;
+      type: "directory" | "file";
+    }>;
+  }> {
+    const params = readCodexFetchParams(body);
+    if (!isJsonRecord(params)) {
+      throw new Error("Missing workspace directory entries params.");
+    }
+
+    const workspaceRoot = await this.resolveWorkspaceRootPickerDirectoryPath(
+      {
+        path: typeof params.workspaceRoot === "string" ? params.workspaceRoot : "",
+      },
+      {
+        fallbackToHome: false,
+        pathKey: "path",
+      },
+    );
+    const requestedDirectoryPath =
+      typeof params.directoryPath === "string" && params.directoryPath.trim().length > 0
+        ? params.directoryPath.trim()
+        : workspaceRoot;
+    const directoryPathCandidate = isAbsolute(requestedDirectoryPath)
+      ? requestedDirectoryPath
+      : join(workspaceRoot, requestedDirectoryPath);
+    const directoryPath = await this.resolveWorkspaceRootPickerDirectoryPath(
+      {
+        path: directoryPathCandidate,
+      },
+      {
+        fallbackToHome: false,
+        pathKey: "path",
+      },
+    );
+    const relativeDirectoryPath = relative(workspaceRoot, directoryPath);
+    if (
+      relativeDirectoryPath === ".." ||
+      relativeDirectoryPath.startsWith("../") ||
+      isAbsolute(relativeDirectoryPath)
+    ) {
+      throw new Error("Directory path must stay within the selected workspace root.");
+    }
+
+    const includeHidden = params.includeHidden === true;
+    const dirents = await readdir(directoryPath, {
+      withFileTypes: true,
+    });
+    const entries: Array<{
+      name: string;
+      path: string;
+      type: "directory" | "file";
+    }> = [];
+
+    for (const dirent of dirents) {
+      if (!includeHidden && dirent.name.startsWith(".")) {
+        continue;
+      }
+
+      const entryPath = join(directoryPath, dirent.name);
+      const workspaceRelativeEntryPath = relative(workspaceRoot, entryPath).replaceAll("\\", "/");
+      if (dirent.isDirectory()) {
+        entries.push({
+          name: dirent.name,
+          path: workspaceRelativeEntryPath,
+          type: "directory",
+        });
+        continue;
+      }
+
+      if (dirent.isFile()) {
+        entries.push({
+          name: dirent.name,
+          path: workspaceRelativeEntryPath,
+          type: "file",
+        });
+        continue;
+      }
+
+      if (!dirent.isSymbolicLink()) {
+        continue;
+      }
+
+      try {
+        const stats = await stat(entryPath);
+        if (stats.isDirectory()) {
+          entries.push({
+            name: dirent.name,
+            path: workspaceRelativeEntryPath,
+            type: "directory",
+          });
+          continue;
+        }
+        if (stats.isFile()) {
+          entries.push({
+            name: dirent.name,
+            path: workspaceRelativeEntryPath,
+            type: "file",
+          });
+        }
+      } catch {
+        // Ignore broken or inaccessible symlinks in the workspace browser.
+      }
+    }
+
+    entries.sort((left, right) => compareWorkspaceDirectoryEntries(left, right));
+
+    return {
+      directoryPath: relativeDirectoryPath.replaceAll("\\", "/"),
+      entries,
+    };
+  }
+
   private emitConnectionState(): void {
     this.emit("bridge_message", {
       type: "codex-app-server-connection-changed",
@@ -1796,6 +1912,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
             labels: Object.fromEntries(this.workspaceRootLabels),
           },
         };
+      case "workspace-directory-entries":
+        try {
+          return {
+            status: 200,
+            body: await this.listWorkspaceDirectoryEntries(body),
+          };
+        } catch (error) {
+          return {
+            status: 400,
+            body: {
+              error: normalizeError(error).message,
+            },
+          };
+        }
       case "add-workspace-root-option":
         return {
           status: 200,
@@ -1892,6 +2022,8 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           status: 200,
           body: await this.writeCodexAgentsMarkdown(body),
         };
+      case "read-file-metadata":
+        return await this.readCodexFileMetadata(body);
       case "read-file":
         return await this.readCodexFile(body);
       case "list-automations":
@@ -2526,6 +2658,62 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
   }
 
+  private async readCodexFileMetadata(body: unknown): Promise<RelativeFetchResponse> {
+    const path = readCodexFilePath(body);
+    if (!path) {
+      return {
+        status: 400,
+        body: {
+          error: "File path is required.",
+        },
+      };
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = normalizeCodexReadFilePath(path);
+    } catch (error) {
+      return {
+        status: 400,
+        body: {
+          error: normalizeError(error).message,
+        },
+      };
+    }
+
+    try {
+      const stats = await stat(resolvedPath);
+      return {
+        status: 200,
+        body: {
+          path: resolvedPath,
+          isFile: stats.isFile(),
+          ...(stats.isFile() ? { sizeBytes: stats.size } : {}),
+        },
+      };
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return {
+          status: 404,
+          body: {
+            error: "File not found.",
+          },
+        };
+      }
+
+      if (isPermissionDeniedError(error)) {
+        return {
+          status: 403,
+          body: {
+            error: "File is not readable.",
+          },
+        };
+      }
+
+      throw error;
+    }
+  }
+
   private readDeveloperInstructions(body: unknown): string | null {
     if (!isJsonRecord(body)) {
       return null;
@@ -3101,6 +3289,26 @@ function compareWorkspaceRootBrowserEntries(
   left: { name: string },
   right: { name: string },
 ): number {
+  const leftHidden = left.name.startsWith(".");
+  const rightHidden = right.name.startsWith(".");
+  if (leftHidden !== rightHidden) {
+    return leftHidden ? 1 : -1;
+  }
+
+  return left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function compareWorkspaceDirectoryEntries(
+  left: { name: string; type: "directory" | "file" },
+  right: { name: string; type: "directory" | "file" },
+): number {
+  if (left.type !== right.type) {
+    return left.type === "directory" ? -1 : 1;
+  }
+
   const leftHidden = left.name.startsWith(".");
   const rightHidden = right.name.startsWith(".");
   if (leftHidden !== rightHidden) {
