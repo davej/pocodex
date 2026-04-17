@@ -210,6 +210,51 @@ interface RecommendedSkillsResponse {
   error?: string;
 }
 
+type AmbientSuggestionStatus = "pending" | "accepted" | "dismissed";
+
+type AmbientSuggestionThreadAction =
+  | {
+      type: "new-thread";
+    }
+  | {
+      type: "continue-thread";
+      threadId: string;
+    };
+
+interface AmbientSuggestion {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  threadAction: AmbientSuggestionThreadAction;
+  appIds: string[];
+  status: AmbientSuggestionStatus;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+interface AmbientSuggestionsFile {
+  projectRoot: string;
+  generatedAtMs: number | null;
+  currentSuggestionIds: string[];
+  suggestions: AmbientSuggestion[];
+}
+
+interface AmbientSuggestionsResponse {
+  file: AmbientSuggestionsFile;
+}
+
+interface AmbientSuggestionsGenerationStatus {
+  projectRoot: string;
+  runningCount: number;
+  runningStartedAtMs: number | null;
+  lastFinishedAtMs: number | null;
+}
+
+interface AmbientSuggestionsGenerationStatusesResponse {
+  statuses: AmbientSuggestionsGenerationStatus[];
+}
+
 type UsageVisibilityPlan = "plus" | "pro" | "prolite";
 
 interface LocalRateLimitWindowSnapshot {
@@ -290,6 +335,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly sharedObjectSubscriptions = new Set<string>();
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
+  private readonly ambientSuggestionsByProjectRoot = new Map<string, AmbientSuggestionsFile>();
+  private readonly ambientSuggestionGenerationStatuses = new Map<
+    string,
+    AmbientSuggestionsGenerationStatus
+  >();
   private readonly codexHomePath: string;
   private persistedAtomRegistryPath: string;
   private workspaceRootRegistryPath: string;
@@ -1906,6 +1956,35 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           status: 200,
           body: await this.readRecommendedSkills(body),
         };
+      case "ambient-suggestions":
+        return {
+          status: 200,
+          body: this.readAmbientSuggestions(body),
+        };
+      case "ambient-suggestions-refresh":
+        return {
+          status: 200,
+          body: this.refreshAmbientSuggestions(body),
+        };
+      case "ambient-suggestions-generation-statuses":
+        return {
+          status: 200,
+          body: this.readAmbientSuggestionGenerationStatuses(),
+        };
+      case "ambient-suggestion-set-status":
+        try {
+          return {
+            status: 200,
+            body: this.setAmbientSuggestionStatus(body),
+          };
+        } catch (error) {
+          return {
+            status: 400,
+            body: {
+              error: normalizeError(error).message,
+            },
+          };
+        }
       case "fast-mode-rollout-metrics":
         return {
           status: 200,
@@ -2003,6 +2082,89 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
   }
 
+  private readAmbientSuggestions(body: unknown): AmbientSuggestionsResponse {
+    const { projectRoot } = readAmbientSuggestionParams(body);
+    return {
+      file: cloneAmbientSuggestionsFile(this.getAmbientSuggestionsFile(projectRoot)),
+    };
+  }
+
+  private refreshAmbientSuggestions(body: unknown): { ok: true } {
+    const { projectRoot } = readAmbientSuggestionParams(body);
+    const generatedAtMs = Date.now();
+    const entry = this.getAmbientSuggestionsFile(projectRoot);
+    entry.generatedAtMs = generatedAtMs;
+
+    const status = this.getAmbientSuggestionGenerationStatus(projectRoot);
+    status.runningCount = 0;
+    status.runningStartedAtMs = null;
+    status.lastFinishedAtMs = generatedAtMs;
+
+    return {
+      ok: true,
+    };
+  }
+
+  private readAmbientSuggestionGenerationStatuses(): AmbientSuggestionsGenerationStatusesResponse {
+    return {
+      statuses: Array.from(this.ambientSuggestionGenerationStatuses.values())
+        .sort((left, right) => left.projectRoot.localeCompare(right.projectRoot))
+        .map(cloneAmbientSuggestionsGenerationStatus),
+    };
+  }
+
+  private setAmbientSuggestionStatus(body: unknown): AmbientSuggestionsResponse {
+    const request = readAmbientSuggestionSetStatusRequest(body);
+    const entry = this.getAmbientSuggestionsFile(request.projectRoot);
+    const suggestion = entry.suggestions.find((item) => item.id === request.suggestionId);
+    if (suggestion) {
+      suggestion.status = request.status;
+      suggestion.updatedAtMs = Date.now();
+    }
+
+    if (request.status === "pending") {
+      if (!entry.currentSuggestionIds.includes(request.suggestionId)) {
+        entry.currentSuggestionIds.push(request.suggestionId);
+      }
+    } else {
+      entry.currentSuggestionIds = entry.currentSuggestionIds.filter(
+        (suggestionId) => suggestionId !== request.suggestionId,
+      );
+    }
+
+    return {
+      file: cloneAmbientSuggestionsFile(entry),
+    };
+  }
+
+  private getAmbientSuggestionsFile(projectRoot: string): AmbientSuggestionsFile {
+    const normalizedProjectRoot = projectRoot.trim();
+    let entry = this.ambientSuggestionsByProjectRoot.get(normalizedProjectRoot);
+    if (!entry) {
+      entry = buildEmptyAmbientSuggestionsFile(normalizedProjectRoot);
+      this.ambientSuggestionsByProjectRoot.set(normalizedProjectRoot, entry);
+    }
+
+    return entry;
+  }
+
+  private getAmbientSuggestionGenerationStatus(
+    projectRoot: string,
+  ): AmbientSuggestionsGenerationStatus {
+    const normalizedProjectRoot = projectRoot.trim();
+    let entry = this.ambientSuggestionGenerationStatuses.get(normalizedProjectRoot);
+    if (!entry) {
+      entry = {
+        projectRoot: normalizedProjectRoot,
+        runningCount: 0,
+        runningStartedAtMs: null,
+        lastFinishedAtMs: null,
+      };
+      this.ambientSuggestionGenerationStatuses.set(normalizedProjectRoot, entry);
+    }
+
+    return entry;
+  }
   private async handleRelativeFetchRequest(
     request: RelativeFetchRequestContext,
   ): Promise<RelativeFetchResponse | null> {
@@ -4562,6 +4724,77 @@ function readCodexFetchParams(body: unknown): unknown {
   }
 
   return isJsonRecord(body.params) ? body.params : body;
+}
+
+function readAmbientSuggestionParams(body: unknown): {
+  projectRoot: string;
+} {
+  const params = readCodexFetchParams(body);
+  return {
+    projectRoot:
+      isJsonRecord(params) && typeof params.projectRoot === "string" ? params.projectRoot : "",
+  };
+}
+
+function readAmbientSuggestionSetStatusRequest(body: unknown): {
+  projectRoot: string;
+  suggestionId: string;
+  status: AmbientSuggestionStatus;
+} {
+  const params = readCodexFetchParams(body);
+  if (!isJsonRecord(params)) {
+    throw new Error("Ambient suggestion params are required.");
+  }
+
+  const suggestionId = typeof params.suggestionId === "string" ? params.suggestionId.trim() : "";
+  if (suggestionId.length === 0) {
+    throw new Error("Ambient suggestion ID is required.");
+  }
+
+  const status = params.status;
+  if (status !== "pending" && status !== "accepted" && status !== "dismissed") {
+    throw new Error("Ambient suggestion status is required.");
+  }
+
+  return {
+    projectRoot: typeof params.projectRoot === "string" ? params.projectRoot : "",
+    suggestionId,
+    status,
+  };
+}
+
+function buildEmptyAmbientSuggestionsFile(projectRoot: string): AmbientSuggestionsFile {
+  return {
+    projectRoot,
+    generatedAtMs: null,
+    currentSuggestionIds: [],
+    suggestions: [],
+  };
+}
+
+function cloneAmbientSuggestion(suggestion: AmbientSuggestion): AmbientSuggestion {
+  return {
+    ...suggestion,
+    threadAction: { ...suggestion.threadAction },
+    appIds: [...suggestion.appIds],
+  };
+}
+
+function cloneAmbientSuggestionsFile(file: AmbientSuggestionsFile): AmbientSuggestionsFile {
+  return {
+    projectRoot: file.projectRoot,
+    generatedAtMs: file.generatedAtMs,
+    currentSuggestionIds: [...file.currentSuggestionIds],
+    suggestions: file.suggestions.map(cloneAmbientSuggestion),
+  };
+}
+
+function cloneAmbientSuggestionsGenerationStatus(
+  status: AmbientSuggestionsGenerationStatus,
+): AmbientSuggestionsGenerationStatus {
+  return {
+    ...status,
+  };
 }
 
 function isFileNotFoundError(error: unknown): boolean {

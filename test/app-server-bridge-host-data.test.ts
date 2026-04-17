@@ -131,6 +131,195 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("serves ambient suggestion routes with codex-compatible payloads", async () => {
+    const bridge = await createBridge(children);
+    const projectRoot = TEST_WORKSPACE_ROOT;
+    const bridgeState = bridge as unknown as {
+      ambientSuggestionsByProjectRoot: Map<string, unknown>;
+    };
+    bridgeState.ambientSuggestionsByProjectRoot.set(projectRoot, {
+      projectRoot,
+      generatedAtMs: null,
+      currentSuggestionIds: ["generated-1"],
+      suggestions: [
+        {
+          id: "generated-1",
+          title: "Review recent changes",
+          description: "Inspect the latest edits in this workspace.",
+          prompt: "Review the recent changes in this workspace.",
+          threadAction: {
+            type: "new-thread",
+          },
+          appIds: [],
+          status: "pending",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+        },
+      ],
+    });
+
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ambient-suggestions",
+      method: "POST",
+      url: "vscode://codex/ambient-suggestions",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+          projectRoot,
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ambient-set-status",
+      method: "POST",
+      url: "vscode://codex/ambient-suggestion-set-status",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+          projectRoot,
+          suggestionId: "generated-1",
+          status: "dismissed",
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ambient-refresh",
+      method: "POST",
+      url: "vscode://codex/ambient-suggestions-refresh",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+          projectRoot,
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ambient-statuses",
+      method: "POST",
+      url: "vscode://codex/ambient-suggestions-generation-statuses",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+        },
+      }),
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-ambient-suggestions-after-refresh",
+      method: "POST",
+      url: "vscode://codex/ambient-suggestions",
+      body: JSON.stringify({
+        params: {
+          hostId: "local",
+          projectRoot,
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-ambient-suggestions-after-refresh")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-ambient-suggestions")).toEqual({
+      file: {
+        projectRoot,
+        generatedAtMs: null,
+        currentSuggestionIds: ["generated-1"],
+        suggestions: [
+          {
+            id: "generated-1",
+            title: "Review recent changes",
+            description: "Inspect the latest edits in this workspace.",
+            prompt: "Review the recent changes in this workspace.",
+            threadAction: {
+              type: "new-thread",
+            },
+            appIds: [],
+            status: "pending",
+            createdAtMs: 0,
+            updatedAtMs: 0,
+          },
+        ],
+      },
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-ambient-set-status")).toEqual({
+      file: {
+        projectRoot,
+        generatedAtMs: null,
+        currentSuggestionIds: [],
+        suggestions: [
+          {
+            id: "generated-1",
+            title: "Review recent changes",
+            description: "Inspect the latest edits in this workspace.",
+            prompt: "Review the recent changes in this workspace.",
+            threadAction: {
+              type: "new-thread",
+            },
+            appIds: [],
+            status: "dismissed",
+            createdAtMs: 0,
+            updatedAtMs: expect.any(Number),
+          },
+        ],
+      },
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-ambient-refresh")).toEqual({
+      ok: true,
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-ambient-statuses")).toEqual({
+      statuses: [
+        {
+          projectRoot,
+          runningCount: 0,
+          runningStartedAtMs: null,
+          lastFinishedAtMs: expect.any(Number),
+        },
+      ],
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-ambient-suggestions-after-refresh")).toEqual({
+      file: {
+        projectRoot,
+        generatedAtMs: expect.any(Number),
+        currentSuggestionIds: [],
+        suggestions: [
+          {
+            id: "generated-1",
+            title: "Review recent changes",
+            description: "Inspect the latest edits in this workspace.",
+            prompt: "Review the recent changes in this workspace.",
+            threadAction: {
+              type: "new-thread",
+            },
+            appIds: [],
+            status: "dismissed",
+            createdAtMs: 0,
+            updatedAtMs: expect.any(Number),
+          },
+        ],
+      },
+    });
+
+    await bridge.close();
+  });
+
   it("generates thread titles for host fetch requests", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
