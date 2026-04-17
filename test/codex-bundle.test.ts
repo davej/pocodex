@@ -107,7 +107,12 @@ describe("codex-bundle", () => {
     await mkdir(join(versionCacheRoot, "__cli", "windows-app"), { recursive: true });
     await writeFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "cached", "utf8");
 
-    asarMock.listPackage.mockReturnValue(["/webview/index.html", "/webview/assets/app-test.png"]);
+    asarMock.listPackage.mockReturnValue([
+      "/webview/index.html",
+      "/webview/assets/app-test.png",
+      "/webview/assets/index-test.js",
+      "/webview/assets/use-model-settings-test.js",
+    ]);
     asarMock.statFile.mockReturnValue({ size: 1 });
     asarMock.extractFile.mockImplementation((_appAsarPath, filename) => {
       if (filename === "package.json") {
@@ -126,6 +131,18 @@ describe("codex-bundle", () => {
       if (filename === "webview/assets/app-test.png") {
         return Buffer.from("png");
       }
+      if (filename === "webview/assets/index-test.js") {
+        return Buffer.from(
+          "function GQ(){let b=`electron`,_=null;if(b===`browser`){_.current?.click();return}try{return Xn(`pick-files`,{params:{pickerTitle:`Select files`}})}catch{throw new Error(`composer.addContext.openFilePickerError: Unable to open file picker`)}}",
+          "utf8",
+        );
+      }
+      if (filename === "webview/assets/use-model-settings-test.js") {
+        return Buffer.from(
+          "function jE(){return async({imagesOnly:t,pickerTitle:n=`Select files`}={})=>(await Se(`pick-files`,{params:{...t?{imagesOnly:!0}:{},pickerTitle:n}})).files??[]}async function H(e){return(await Promise.all(e.map(async e=>{try{let t=await Se(`read-file-binary`,{params:{path:e.fsPath,hostId:N}});if(!t.contentsBase64)return null;return{dataUrl:t.contentsBase64,filename:e.label}}catch{return null}}))).filter(e=>e!=null)}function V(){try{return jE()}catch{throw new Error(`composer.addContext.openFilePickerError: Unable to open file picker`)}}",
+          "utf8",
+        );
+      }
 
       throw new Error(`Unexpected asar extract for ${filename}`);
     });
@@ -136,8 +153,62 @@ describe("codex-bundle", () => {
     expect(bundle.faviconHref).toBe("./assets/app-test.png");
     await expect(bundle.readIndexHtml()).resolves.toBe("<html>codex</html>");
     await expect(
+      readFile(join(bundle.webviewRoot, "assets", "index-test.js"), "utf8"),
+    ).resolves.toContain("window.location.protocol!==`file:`");
+    await expect(
+      readFile(join(bundle.webviewRoot, "assets", "use-model-settings-test.js"), "utf8"),
+    ).resolves.toContain("__pocodexBrowserPickFiles");
+    await expect(
+      readFile(join(bundle.webviewRoot, "assets", "use-model-settings-test.js"), "utf8"),
+    ).resolves.toContain("e.contentsBase64?{contentsBase64:e.contentsBase64}");
+    await expect(
+      readFile(join(bundle.webviewRoot, ".pocodex-webview-patches-v1"), "utf8"),
+    ).resolves.toBe("ok");
+    await expect(
       readFile(join(versionCacheRoot, "__cli", "windows-app", "codex"), "utf8"),
     ).resolves.toBe("cached");
+  });
+
+  it("patches an existing cached webview in place", async () => {
+    const homeDirectory = await mkdtemp(join(tmpdir(), "pocodex-home-"));
+    tempDirs.push(homeDirectory);
+    process.env.HOME = homeDirectory;
+
+    const appPath = await createWindowsInstallLayout();
+    const versionCacheRoot = join(homeDirectory, ".cache", "pocodex", "26.313.5234.0__prod__5234");
+    const webviewRoot = join(versionCacheRoot, "__webview");
+    await mkdir(join(webviewRoot, "assets"), { recursive: true });
+    await writeFile(join(webviewRoot, ".complete"), "ok", "utf8");
+    await writeFile(join(webviewRoot, "index.html"), "<html>cached</html>", "utf8");
+    await writeFile(join(webviewRoot, "assets", "app-test.png"), "png", "utf8");
+    await writeFile(
+      join(webviewRoot, "assets", "index-test.js"),
+      "function GQ(){let b=`electron`,_=null;if(b===`browser`){_.current?.click();return}try{return Xn(`pick-files`,{params:{pickerTitle:`Select files`}})}catch{throw new Error(`composer.addContext.openFilePickerError: Unable to open file picker`)}}",
+      "utf8",
+    );
+    await writeFile(
+      join(webviewRoot, "assets", "use-model-settings-test.js"),
+      "function jE(){return async({imagesOnly:t,pickerTitle:n=`Select files`}={})=>(await Se(`pick-files`,{params:{...t?{imagesOnly:!0}:{},pickerTitle:n}})).files??[]}async function H(e){return(await Promise.all(e.map(async e=>{try{let t=await Se(`read-file-binary`,{params:{path:e.fsPath,hostId:N}});if(!t.contentsBase64)return null;return{dataUrl:t.contentsBase64,filename:e.label}}catch{return null}}))).filter(e=>e!=null)}function V(){try{return jE()}catch{throw new Error(`composer.addContext.openFilePickerError: Unable to open file picker`)}}",
+      "utf8",
+    );
+
+    const bundle = await loadCodexBundle(appPath);
+
+    expect(bundle.webviewRoot).toBe(webviewRoot);
+    expect(bundle.faviconHref).toBe("./assets/app-test.png");
+    await expect(bundle.readIndexHtml()).resolves.toBe("<html>cached</html>");
+    await expect(readFile(join(webviewRoot, "assets", "index-test.js"), "utf8")).resolves.toContain(
+      "window.location.protocol!==`file:`",
+    );
+    await expect(
+      readFile(join(webviewRoot, "assets", "use-model-settings-test.js"), "utf8"),
+    ).resolves.toContain("__pocodexBrowserPickFiles");
+    await expect(
+      readFile(join(webviewRoot, "assets", "use-model-settings-test.js"), "utf8"),
+    ).resolves.toContain("e.contentsBase64?{contentsBase64:e.contentsBase64}");
+    await expect(readFile(join(webviewRoot, ".pocodex-webview-patches-v1"), "utf8")).resolves.toBe(
+      "ok",
+    );
   });
 
   it("separates cached artifacts for builds that share a version string", async () => {
