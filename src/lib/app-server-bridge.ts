@@ -1796,6 +1796,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
             labels: Object.fromEntries(this.workspaceRootLabels),
           },
         };
+      case "projectless-thread-cwd":
+        return {
+          status: 200,
+          body: this.readProjectlessThreadCwd(),
+        };
       case "add-workspace-root-option":
         return {
           status: 200,
@@ -2261,6 +2266,25 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       canMerge,
       ciStatus: deriveGhCiStatus(prInfo.statusCheckRollup),
       url: prInfo.url,
+    };
+  }
+
+  private readProjectlessThreadCwd(): {
+    cwd: string;
+    outputDirectory: string;
+    workspaceRoot: string;
+  } {
+    const cwd = homedir();
+    const workspaceRoot =
+      (this.activeWorkspaceRoot && existsSync(this.activeWorkspaceRoot)
+        ? this.activeWorkspaceRoot
+        : null) ??
+      Array.from(this.workspaceRoots).find((root) => existsSync(root)) ??
+      cwd;
+    return {
+      cwd,
+      outputDirectory: cwd,
+      workspaceRoot,
     };
   }
 

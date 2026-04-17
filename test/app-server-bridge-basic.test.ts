@@ -16,6 +16,7 @@ import {
   waitForCondition,
   toSvgDataUrl,
   isBridgeMessage,
+  writeWorkspaceRootRegistry,
 } from "./support/app-server-bridge-test-kit.js";
 
 describeAppServerBridge(({ children }) => {
@@ -481,6 +482,45 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("resolves the projectless thread cwd using home and the active workspace root", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-projectless-thread-cwd-"));
+    tempDirs.push(tempDirectory);
+    const workspaceRootRegistryPath = await writeWorkspaceRootRegistry(tempDirectory, {
+      roots: [TEST_WORKSPACE_ROOT],
+      activeRoot: TEST_WORKSPACE_ROOT,
+    });
+    const bridge = await createBridge(children, {
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-projectless-thread-cwd",
+      method: "POST",
+      url: "vscode://codex/projectless-thread-cwd",
+      body: JSON.stringify({
+        params: {
+          prompt: "Create a scratch file",
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-projectless-thread-cwd")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-projectless-thread-cwd")).toEqual({
+      cwd: homedir(),
+      outputDirectory: homedir(),
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+    });
+
+    await bridge.close();
+  });
   it("creates on attach, ignores early resize, and rebinds terminal sessions by conversation", async () => {
     process.env.SHELL = "/bin/zsh";
     const bridge = await createBridge(children);
