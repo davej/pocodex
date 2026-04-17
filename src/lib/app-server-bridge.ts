@@ -131,7 +131,7 @@ interface ManagedCodexAuth {
 }
 
 interface AppServerMcpRequestEnvelope {
-  type: "mcp-request";
+  type: "mcp-request" | "thread-prewarm-start";
   request?: JsonRpcRequest;
 }
 
@@ -502,6 +502,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         await this.handleRenameWorkspaceRootOption(message);
         return;
       case "mcp-request":
+      case "thread-prewarm-start":
         await this.handleMcpRequest(message as unknown as AppServerMcpRequestEnvelope);
         return;
       case "mcp-response":

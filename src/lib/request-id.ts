@@ -15,7 +15,7 @@ export function rewriteRequestIdsForHost(sessionId: string, message: unknown): u
   }
 
   if (
-    message.type === "mcp-request" &&
+    (message.type === "mcp-request" || message.type === "thread-prewarm-start") &&
     isJsonRecord(message.request) &&
     typeof message.request.id === "string"
   ) {
@@ -29,7 +29,7 @@ export function rewriteRequestIdsForHost(sessionId: string, message: unknown): u
   }
 
   if (
-    message.type === "mcp-request" &&
+    (message.type === "mcp-request" || message.type === "thread-prewarm-start") &&
     isJsonRecord(message.message) &&
     typeof message.message.id === "string"
   ) {

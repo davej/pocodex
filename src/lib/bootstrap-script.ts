@@ -674,12 +674,17 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     const ariaLabel = element.getAttribute("aria-label")?.trim().toLowerCase() ?? "";
-    if (ariaLabel === "new thread" || ariaLabel.startsWith("start new thread in ")) {
+    if (
+      ariaLabel === "new thread" ||
+      ariaLabel === "new chat" ||
+      ariaLabel.startsWith("start new thread in ") ||
+      ariaLabel.startsWith("start new chat in ")
+    ) {
       return true;
     }
 
-    const text = element.textContent?.trim().toLowerCase() ?? "";
-    return text === "new thread";
+    const text = element.textContent?.replace(/\s+/g, " ").trim().toLowerCase() ?? "";
+    return text.startsWith("new thread") || text.startsWith("new chat");
   }
 
   function isAddPhotosAndFilesMenuItem(element: Element): boolean {
@@ -2954,11 +2959,16 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   function restoreStoredRouteIfNeeded(): void {
     const currentUrl = new URL(window.location.href);
+    const storedRoute = readSessionStorage(LAST_ROUTE_STORAGE_KEY);
+    const threadQuery = readThreadQueryConversationId(currentUrl);
+    const legacyInitialRoute = readLegacyInitialRoute(currentUrl);
+    const hasExplicitInitialRoute = currentUrl.searchParams.has(LEGACY_INITIAL_ROUTE_QUERY_KEY);
     if (currentUrl.pathname !== "/" && currentUrl.pathname !== "/index.html") {
       return;
     }
-
-    const storedRoute = readSessionStorage(LAST_ROUTE_STORAGE_KEY);
+    if (threadQuery || legacyInitialRoute || hasExplicitInitialRoute) {
+      return;
+    }
     if (!storedRoute) {
       return;
     }

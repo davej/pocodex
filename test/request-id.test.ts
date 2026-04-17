@@ -24,6 +24,17 @@ describe("request-id routing", () => {
     expect(rewritten.request.id).toBe("pocodex:session-a:mcp-1");
   });
 
+  it("prefixes thread prewarm request IDs for the host renderer", () => {
+    const rewritten = rewriteRequestIdsForHost("session-a", {
+      type: "thread-prewarm-start",
+      request: {
+        id: "prewarm-1",
+      },
+    }) as { request: { id: string } };
+
+    expect(rewritten.request.id).toBe("pocodex:session-a:prewarm-1");
+  });
+
   it("strips prefixed host response IDs and routes them to the right session", () => {
     const routed = routeHostMessage({
       type: "fetch-response",

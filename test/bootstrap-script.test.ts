@@ -548,6 +548,7 @@ function createBootstrapHarness(
   options: {
     href?: string;
     localStorageEntries?: Record<string, string>;
+    sessionStorageEntries?: Record<string, string>;
     mobile?: boolean;
   } = {},
 ) {
@@ -555,7 +556,9 @@ function createBootstrapHarness(
   const localStorageEntries = new Map<string, string>(
     Object.entries(options.localStorageEntries ?? {}),
   );
-  const sessionStorageEntries = new Map<string, string>();
+  const sessionStorageEntries = new Map<string, string>(
+    Object.entries(options.sessionStorageEntries ?? {}),
+  );
   const serviceWorkerRegistrations: Array<{
     scriptUrl: string;
     options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" };
@@ -1559,6 +1562,32 @@ describe("renderBootstrapScript", () => {
     windowObject.history.pushState(null, "", "/local/thread-2?view=diff&token=secret#panel");
 
     expect(storage.get("__pocodex_last_route")).toBe("/local/thread-2?view=diff#panel");
+  });
+
+  it("preserves an explicit thread query when restoring the stored route", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+      sessionStorageEntries: {
+        __pocodex_last_route: "/",
+      },
+    });
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+
+    const currentUrl = new URL(harness.windowObject.location.href);
+    expect(currentUrl.searchParams.get("token")).toBe("secret");
+    expect(currentUrl.searchParams.get("thread")).toBe("thr_123");
   });
 
   it("closes the mobile sidebar after clicking thread and new-thread navigation in the sidebar", () => {
@@ -3240,37 +3269,51 @@ describe("renderBootstrapScript", () => {
     });
   });
 
-  it("clears the thread query param when clicking a new-thread control", async () => {
-    const script = renderBootstrapScript({
-      sentryOptions: {
-        buildFlavor: "stable",
-        appVersion: "1",
-        buildNumber: "123",
-        codexAppSessionId: "session-id",
-      },
-      stylesheetHref: "/pocodex.css",
-    });
+  it.each([
+    { ariaLabel: null, text: "New thread" },
+    { ariaLabel: null, text: "New chat" },
+    { ariaLabel: null, text: "New chat Ctrl+N" },
+    { ariaLabel: "Start new thread in pocodex", text: "" },
+    { ariaLabel: "Start new chat in pocodex", text: "" },
+  ])(
+    "clears the thread query param when clicking a new conversation control %#",
+    async (control) => {
+      const script = renderBootstrapScript({
+        sentryOptions: {
+          buildFlavor: "stable",
+          appVersion: "1",
+          buildNumber: "123",
+          codexAppSessionId: "session-id",
+        },
+        stylesheetHref: "/pocodex.css",
+      });
 
-    const harness = createBootstrapHarness({
-      href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
-    });
-    const nav = harness.document.createElement("nav");
-    nav.setAttribute("role", "navigation");
-    const newThreadButton = harness.document.createElement("button");
-    newThreadButton.textContent = "New thread";
-    nav.appendChild(newThreadButton);
-    harness.document.body.appendChild(nav);
+      const harness = createBootstrapHarness({
+        href: "http://127.0.0.1:8787/?token=secret&thread=thr_123",
+      });
+      const nav = harness.document.createElement("nav");
+      nav.setAttribute("role", "navigation");
+      const newConversationButton = harness.document.createElement("button");
+      if (control.ariaLabel) {
+        newConversationButton.setAttribute("aria-label", control.ariaLabel);
+      }
+      newConversationButton.textContent = control.text;
+      nav.appendChild(newConversationButton);
+      harness.document.body.appendChild(nav);
 
-    harness.run(script);
-    await flushBootstrapMicrotasks();
+      harness.run(script);
+      await flushBootstrapMicrotasks();
 
-    harness.document.dispatchEvent(new TestMouseEvent("click", { target: newThreadButton }));
-    drainTestTimers(harness.timers);
+      harness.document.dispatchEvent(
+        new TestMouseEvent("click", { target: newConversationButton }),
+      );
+      drainTestTimers(harness.timers);
 
-    const currentUrl = new URL(harness.windowObject.location.href);
-    expect(currentUrl.searchParams.get("token")).toBe("secret");
-    expect(currentUrl.searchParams.get("thread")).toBeNull();
-  });
+      const currentUrl = new URL(harness.windowObject.location.href);
+      expect(currentUrl.searchParams.get("token")).toBe("secret");
+      expect(currentUrl.searchParams.get("thread")).toBeNull();
+    },
+  );
 
   it("dispatches a single local-thread restore sequence after ready for a thread query param", async () => {
     const script = renderBootstrapScript({

@@ -10,6 +10,7 @@ import {
   FakeGitWorkerBridge,
   getFetchResponse,
   getFetchJsonBody,
+  getMcpResponse,
   waitForCondition,
 } from "./support/app-server-bridge-test-kit.js";
 
@@ -353,6 +354,63 @@ describeAppServerBridge(({ children }) => {
     expect(forwarded).toContain('"model":"gpt-5.4"');
     expect(forwarded).not.toContain('"config"');
     expect(forwarded).not.toContain('"modelProvider"');
+
+    await bridge.close();
+  });
+
+  it("forwards thread prewarm start requests and resolves their responses", async () => {
+    const bridge = await createBridge(children);
+    const child = children.at(0);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "thread-prewarm-start",
+      request: {
+        id: "prewarm-1",
+        method: "thread/start",
+        params: {
+          cwd: TEST_WORKSPACE_ROOT,
+          modelProvider: "codex_vscode_copilot",
+          config: {
+            analytics: "",
+            model: "gpt-5.4",
+          },
+        },
+      },
+    });
+
+    const forwarded = child?.writes ?? "";
+    expect(forwarded).toContain('"id":"prewarm-1"');
+    expect(forwarded).toContain('"method":"thread/start"');
+    expect(forwarded).toContain(`"cwd":"${TEST_WORKSPACE_ROOT}"`);
+    expect(forwarded).toContain('"model":"gpt-5.4"');
+    expect(forwarded).not.toContain('"config"');
+    expect(forwarded).not.toContain('"modelProvider"');
+
+    child?.stdout.write(
+      `${JSON.stringify({
+        id: "prewarm-1",
+        result: {
+          threadId: "thr_prewarm",
+        },
+      })}\n`,
+    );
+
+    await waitForCondition(() => Boolean(getMcpResponse(emittedMessages, "prewarm-1")));
+
+    expect(getMcpResponse(emittedMessages, "prewarm-1")).toEqual({
+      type: "mcp-response",
+      hostId: "local",
+      message: {
+        id: "prewarm-1",
+        result: {
+          threadId: "thr_prewarm",
+        },
+      },
+    });
 
     await bridge.close();
   });
