@@ -80,6 +80,18 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     entries: WorkspaceRootBrowserEntry[];
   };
 
+  type BrowserAttachmentPickerOptions = {
+    imagesOnly?: boolean;
+    pickerTitle?: string;
+  };
+
+  type BrowserAttachmentFile = {
+    label: string;
+    path: string;
+    fsPath: string;
+    contentsBase64?: string;
+  };
+
   type RestorableTerminalAttachment = {
     sessionId: string;
     conversationId: string | null;
@@ -127,6 +139,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   const LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY = "pocodex-sidebar-mode";
   const SIDEBAR_INTERACTION_ARM_MS = 500;
   const SIDEBAR_MODE_TOGGLE_SETTLE_MS = 350;
+  const BROWSER_ATTACHMENT_PICKER_CANCEL_DELAY_MS = 250;
   const HEARTBEAT_STALE_AFTER_MS = 45_000;
   const HEARTBEAT_MONITOR_INTERVAL_MS = 5_000;
   const WAKE_GRACE_PERIOD_MS = 10_000;
@@ -1988,6 +2001,128 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return { ok: true };
   }
 
+  async function pickBrowserAttachmentFiles(
+    options: BrowserAttachmentPickerOptions = {},
+  ): Promise<BrowserAttachmentFile[]> {
+    return new Promise((resolve) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = true;
+      input.tabIndex = -1;
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      input.style.top = "-9999px";
+      input.style.opacity = "0";
+      if (options.imagesOnly) {
+        input.accept = "image/*";
+      }
+      if (options.pickerTitle) {
+        input.title = options.pickerTitle;
+      }
+
+      let settled = false;
+      const cleanup = () => {
+        window.removeEventListener("focus", handleWindowFocus, true);
+        input.remove();
+      };
+      const settle = (files: BrowserAttachmentFile[]) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(files);
+      };
+      const handleWindowFocus = () => {
+        window.setTimeout(() => {
+          if (settled || (input.files?.length ?? 0) > 0) {
+            return;
+          }
+          settle([]);
+        }, BROWSER_ATTACHMENT_PICKER_CANCEL_DELAY_MS);
+      };
+
+      input.addEventListener(
+        "change",
+        () => {
+          void buildBrowserAttachmentFiles(Array.from(input.files ?? []))
+            .then(settle)
+            .catch(() => {
+              settle([]);
+            });
+        },
+        { once: true },
+      );
+      window.addEventListener("focus", handleWindowFocus, true);
+      (document.body ?? document.documentElement).appendChild(input);
+      input.click();
+    });
+  }
+
+  async function buildBrowserAttachmentFiles(files: File[]): Promise<BrowserAttachmentFile[]> {
+    const pickedFiles: BrowserAttachmentFile[] = [];
+    for (const file of files) {
+      const normalizedName = file.name.trim();
+      if (normalizedName.length === 0) {
+        continue;
+      }
+
+      const browserFile: BrowserAttachmentFile = {
+        label: buildBrowserAttachmentLabel(normalizedName),
+        path: normalizedName,
+        fsPath: normalizedName,
+      };
+
+      if (isBrowserAttachmentImage(file)) {
+        const contentsBase64 = await readBrowserAttachmentFileBase64(file);
+        if (contentsBase64) {
+          browserFile.contentsBase64 = contentsBase64;
+        }
+      }
+
+      pickedFiles.push(browserFile);
+    }
+    return pickedFiles;
+  }
+
+  function buildBrowserAttachmentLabel(filename: string): string {
+    const extensionIndex = filename.lastIndexOf(".");
+    if (extensionIndex > 0) {
+      return filename.slice(0, extensionIndex);
+    }
+    return filename;
+  }
+
+  function isBrowserAttachmentImage(file: File): boolean {
+    return (
+      /^image\//i.test(file.type) ||
+      /\.(?:avif|bmp|gif|heic|heif|ico|jpe?g|png|svg|tiff?|webp)$/i.test(file.name)
+    );
+  }
+
+  async function readBrowserAttachmentFileBase64(file: File): Promise<string | null> {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.addEventListener(
+        "load",
+        () => {
+          const result = typeof reader.result === "string" ? reader.result : "";
+          const commaIndex = result.indexOf(",");
+          resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : null);
+        },
+        { once: true },
+      );
+      reader.addEventListener(
+        "error",
+        () => {
+          resolve(null);
+        },
+        { once: true },
+      );
+      reader.readAsDataURL(file);
+    });
+  }
+
   function stopEventPropagation(event: unknown): void {
     if (isRecord(event) && typeof event.stopImmediatePropagation === "function") {
       event.stopImmediatePropagation();
@@ -3570,6 +3705,12 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     value: electronBridge,
     configurable: false,
     enumerable: true,
+    writable: false,
+  });
+  Object.defineProperty(window, "__pocodexBrowserPickFiles", {
+    value: pickBrowserAttachmentFiles,
+    configurable: false,
+    enumerable: false,
     writable: false,
   });
 

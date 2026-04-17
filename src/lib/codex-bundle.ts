@@ -71,6 +71,7 @@ const execFileAsync = promisify(execFile);
 export async function loadCodexBundle(appPath: string): Promise<CodexBundle> {
   const metadata = await loadCodexDesktopMetadata(appPath);
   const webviewRoot = await ensureWebviewCache(metadata);
+  await ensurePocodexWebviewPatches(webviewRoot);
   const faviconHref = await resolveWebviewFaviconHref(webviewRoot);
 
   return {
@@ -281,6 +282,70 @@ async function ensureDesktopWorkerCache(metadata: CodexDesktopMetadata): Promise
   }
 
   return workerPath;
+}
+
+async function ensurePocodexWebviewPatches(webviewRoot: string): Promise<void> {
+  const markerPath = join(webviewRoot, ".pocodex-webview-patches-v1");
+  try {
+    await stat(markerPath);
+    return;
+  } catch {
+    // continue and patch the webview assets
+  }
+
+  await patchAttachmentPickerBundle(webviewRoot);
+  await writeFile(markerPath, "ok");
+}
+
+async function patchAttachmentPickerBundle(webviewRoot: string): Promise<void> {
+  const assetsDirectory = join(webviewRoot, "assets");
+  const entries = await readdir(assetsDirectory, { withFileTypes: true }).catch(() => []);
+
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && /\.js$/i.test(entry.name))
+      .map(async (entry) => {
+        const assetPath = join(assetsDirectory, entry.name);
+        const source = await readFile(assetPath, "utf8");
+        const patched = patchAttachmentPickerBundleSource(source);
+        if (patched !== source) {
+          await writeFile(assetPath, patched, "utf8");
+        }
+      }),
+  );
+}
+
+function patchAttachmentPickerBundleSource(source: string): string {
+  if (
+    !source.includes("pick-files") ||
+    !source.includes("composer.addContext.openFilePickerError")
+  ) {
+    return source;
+  }
+
+  let patched = source;
+
+  patched = patched.replace(
+    /if\(([$A-Za-z_][\w$]*)===([`'"])browser\2\)\{([A-Za-z_$][\w$]*)\.current\?\.click\(\);return\}/,
+    (_match, windowTypeVariable: string, quote: string, inputRefVariable: string) =>
+      `if(${windowTypeVariable}===${quote}browser${quote}||window.location.protocol!==${quote}file:${quote}){${inputRefVariable}.current?.click();return}`,
+  );
+
+  if (!patched.includes("__pocodexBrowserPickFiles")) {
+    patched = patched.replace(
+      "(await Se(`pick-files`,{params:{...t?{imagesOnly:!0}:{},pickerTitle:n}})).files??[]",
+      "((window.location.protocol!==`file:`&&typeof window.__pocodexBrowserPickFiles===`function`?await window.__pocodexBrowserPickFiles({imagesOnly:t,pickerTitle:n}):(await Se(`pick-files`,{params:{...t?{imagesOnly:!0}:{},pickerTitle:n}})).files)??[])",
+    );
+  }
+
+  if (!patched.includes("e.contentsBase64?{contentsBase64:e.contentsBase64}")) {
+    patched = patched.replace(
+      "let t=await Se(`read-file-binary`,{params:{path:e.fsPath,hostId:N}});",
+      "let t=e.contentsBase64?{contentsBase64:e.contentsBase64}:await Se(`read-file-binary`,{params:{path:e.fsPath,hostId:N}});",
+    );
+  }
+
+  return patched;
 }
 
 async function resolveWebviewFaviconHref(webviewRoot: string): Promise<string | null> {
