@@ -538,8 +538,11 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
     scheduleSidebarModeReconcile(5);
     const target = event.target instanceof Element ? event.target : null;
-    if (target) {
-      armSidebarModeInteractionIfToggleTrigger(target);
+    const nextMode = target ? readSidebarToggleTarget(target) : null;
+    if (nextMode) {
+      armSidebarModeInteraction();
+      persistExpectedSidebarToggleTarget(nextMode);
+      scheduleSidebarToggleFallback(nextMode);
     }
   }
 
@@ -767,6 +770,10 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return true;
     }
 
+    if (viewportWidth > 0 && rect.left <= 8 && rect.width >= viewportWidth - 16) {
+      return false;
+    }
+
     if (viewportWidth > 0 && rect.width > 0 && rect.width < viewportWidth - 0.5) {
       return true;
     }
@@ -958,17 +965,29 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     return true;
   }
 
-  function armSidebarModeInteractionIfToggleTrigger(target: Element): void {
+  function readSidebarToggleTarget(target: Element): SidebarMode | null {
     const nearestInteractive = target.closest('button, a, [role="button"]');
     if (!(nearestInteractive instanceof Element)) {
-      return;
+      return null;
     }
 
-    if (!isSidebarToggleTrigger(nearestInteractive)) {
-      return;
+    const ariaLabel = nearestInteractive.getAttribute("aria-label")?.trim().toLowerCase() ?? "";
+    if (ariaLabel === "hide sidebar") {
+      return "collapsed";
+    }
+    if (ariaLabel === "show sidebar") {
+      return "expanded";
     }
 
-    armSidebarModeInteraction();
+    const title = nearestInteractive.getAttribute("title")?.trim().toLowerCase() ?? "";
+    if (title === "hide sidebar") {
+      return "collapsed";
+    }
+    if (title === "show sidebar") {
+      return "expanded";
+    }
+
+    return null;
   }
 
   function armSidebarModeInteraction(): void {
@@ -1000,14 +1019,24 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
     pendingSidebarModeTargetUntil = 0;
   }
 
-  function isSidebarToggleTrigger(element: Element): boolean {
-    const ariaLabel = element.getAttribute("aria-label")?.trim().toLowerCase() ?? "";
-    if (ariaLabel === "hide sidebar" || ariaLabel === "show sidebar") {
-      return true;
-    }
+  function persistExpectedSidebarToggleTarget(nextMode: SidebarMode): void {
+    hasReceivedSidebarModeSync = true;
+    hasRestoredSidebarMode = true;
+    persistSidebarMode(nextMode);
+    notePendingSidebarModeTarget(nextMode);
+  }
 
-    const title = element.getAttribute("title")?.trim().toLowerCase() ?? "";
-    return title === "hide sidebar" || title === "show sidebar";
+  function scheduleSidebarToggleFallback(nextMode: SidebarMode): void {
+    window.setTimeout(() => {
+      if (readSidebarMode() === nextMode) {
+        return;
+      }
+
+      armSidebarModeInteraction();
+      notePendingSidebarModeTarget(nextMode);
+      dispatchHostMessage({ type: "toggle-sidebar" });
+      scheduleSidebarModeReconcile(5);
+    }, 0);
   }
 
   function isSidebarToggleShortcut(event: KeyboardEvent): boolean {
@@ -3508,6 +3537,13 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
           type: "electron-window-focus-changed",
           isFocused: isDocumentVisible() && hasDocumentFocus(),
         });
+        return;
+      }
+      if (isRecord(message) && message.type === "toggle-sidebar") {
+        const nextMode = readSidebarMode() === "expanded" ? "collapsed" : "expanded";
+        armSidebarModeInteraction();
+        persistExpectedSidebarToggleTarget(nextMode);
+        dispatchHostMessage(message);
         return;
       }
       syncRestorableTerminalAttachments(message, "outgoing");
