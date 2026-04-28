@@ -296,22 +296,20 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function persistSessionToken(token: string): void {
-    for (const storageName of ["sessionStorage", "localStorage"] as const) {
-      const storage = getStorage(storageName);
-      if (!storage) {
-        continue;
-      }
+    const storage = getStorage("sessionStorage");
+    if (!storage) {
+      return;
+    }
 
-      if (token) {
-        storage.setItem(TOKEN_STORAGE_KEY, token);
-        continue;
-      }
+    if (token) {
+      storage.setItem(TOKEN_STORAGE_KEY, token);
+      return;
+    }
 
-      if (typeof storage.removeItem === "function") {
-        storage.removeItem(TOKEN_STORAGE_KEY);
-      } else {
-        storage.setItem(TOKEN_STORAGE_KEY, "");
-      }
+    if (typeof storage.removeItem === "function") {
+      storage.removeItem(TOKEN_STORAGE_KEY);
+    } else {
+      storage.setItem(TOKEN_STORAGE_KEY, "");
     }
   }
 
@@ -828,12 +826,31 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       return;
     }
 
-    const desiredMode = sidebarModeFromHost ?? "expanded";
     const currentMode = readSidebarMode();
     if (!currentMode) {
       if (retriesRemaining > 0) {
         scheduleSidebarModeReconcile(retriesRemaining - 1, 50);
       }
+      return;
+    }
+
+    if (sidebarModeFromHost === null && isMobileSidebarViewport()) {
+      hasRestoredSidebarMode = true;
+      if (isSidebarModeInteractionArmed) {
+        persistSidebarMode(currentMode);
+      }
+      return;
+    }
+
+    const desiredMode = sidebarModeFromHost ?? "expanded";
+    if (
+      isMobileSidebarViewport() &&
+      desiredMode === "expanded" &&
+      currentMode === "collapsed" &&
+      !isSidebarModeInteractionArmed
+    ) {
+      persistSidebarMode("collapsed");
+      hasRestoredSidebarMode = true;
       return;
     }
 
@@ -1002,12 +1019,35 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   function isSidebarToggleTrigger(element: Element): boolean {
     const ariaLabel = element.getAttribute("aria-label")?.trim().toLowerCase() ?? "";
-    if (ariaLabel === "hide sidebar" || ariaLabel === "show sidebar") {
+    if (isSidebarToggleLabel(ariaLabel)) {
       return true;
     }
 
     const title = element.getAttribute("title")?.trim().toLowerCase() ?? "";
-    return title === "hide sidebar" || title === "show sidebar";
+    if (isSidebarToggleLabel(title)) {
+      return true;
+    }
+
+    return isSidebarToggleLabel(element.textContent?.trim().toLowerCase() ?? "");
+  }
+
+  function isSidebarToggleLabel(label: string): boolean {
+    return (
+      label === "hide sidebar" ||
+      label === "show sidebar" ||
+      label === "close sidebar" ||
+      label === "open sidebar" ||
+      label === "collapse sidebar" ||
+      label === "expand sidebar" ||
+      label === "toggle sidebar" ||
+      label.startsWith("hide sidebar ") ||
+      label.startsWith("show sidebar ") ||
+      label.startsWith("close sidebar ") ||
+      label.startsWith("open sidebar ") ||
+      label.startsWith("collapse sidebar ") ||
+      label.startsWith("expand sidebar ") ||
+      label.startsWith("toggle sidebar ")
+    );
   }
 
   function isSidebarToggleShortcut(event: KeyboardEvent): boolean {
@@ -1918,7 +1958,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   async function callPocodexIpc(method: string, params?: unknown): Promise<unknown> {
-    const response = await nativeFetch("/ipc-request", {
+    const response = await nativeFetch(getIpcRequestUrl(), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -2917,7 +2957,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
       persistSessionToken(tokenFromQuery);
       return tokenFromQuery;
     }
-    return readStoredTokenValue("sessionStorage") || readStoredTokenValue("localStorage");
+    return readStoredTokenValue("sessionStorage");
   }
 
   async function registerPwaServiceWorker(): Promise<void> {
@@ -3042,6 +3082,15 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
 
   function getSessionCheckUrl(token: string): string {
     const url = new URL(SESSION_CHECK_PATH, window.location.href);
+    if (token) {
+      url.searchParams.set("token", token);
+    }
+    return `${url.pathname}${url.search}`;
+  }
+
+  function getIpcRequestUrl(): string {
+    const url = new URL("/ipc-request", window.location.href);
+    const token = getStoredToken();
     if (token) {
       url.searchParams.set("token", token);
     }
@@ -3510,6 +3559,16 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         });
         return;
       }
+      if (isRecord(message) && message.type === "toggle-sidebar") {
+        armSidebarModeInteraction();
+        window.setTimeout(() => {
+          const currentMode = readSidebarMode();
+          if (currentMode) {
+            persistSidebarMode(currentMode);
+          }
+          scheduleSidebarModeReconcile(5);
+        }, 0);
+      }
       syncRestorableTerminalAttachments(message, "outgoing");
       sendEnvelope({ type: "bridge_message", message });
       syncThreadQueryWithBridgeMessage(message);
@@ -3549,7 +3608,7 @@ function bootstrapPocodexInBrowser(config: BootstrapScriptConfig): void {
         init?.method ??
         (input instanceof Request ? (input as Request & { method?: string }).method : undefined) ??
         "POST";
-      return nativeFetch("/ipc-request", {
+      return nativeFetch(getIpcRequestUrl(), {
         method,
         body: init?.body,
         headers: init?.headers,

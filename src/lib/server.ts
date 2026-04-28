@@ -225,6 +225,20 @@ export class PocodexServer {
     }
 
     if (url.pathname === "/ipc-request") {
+      if (!this.isAuthorized(url.searchParams.get("token"))) {
+        response.statusCode = 401;
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(
+          JSON.stringify({
+            requestId: "",
+            type: "response",
+            resultType: "error",
+            error: "Unauthorized IPC request.",
+          }),
+        );
+        return;
+      }
       await this.handleIpcRequest(request, response);
       return;
     }
@@ -276,6 +290,12 @@ export class PocodexServer {
       return;
     }
 
+    if (!this.isAllowedWebSocketOrigin(request.headers.origin, request.headers.host)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
     this.wsServer.handleUpgrade(request, socket, head, (upgradedSocket) => {
       this.wsServer.emit("connection", upgradedSocket, request);
     });
@@ -316,7 +336,24 @@ export class PocodexServer {
   }
 
   private isAuthorized(requestToken: string | null): boolean {
-    return this.options.token.length === 0 || requestToken === this.options.token;
+    return this.options.token.length > 0 && requestToken === this.options.token;
+  }
+
+  private isAllowedWebSocketOrigin(origin: string | undefined, host: string | undefined): boolean {
+    if (!origin) {
+      return true;
+    }
+
+    if (!host) {
+      return false;
+    }
+
+    try {
+      const originUrl = new URL(origin);
+      return originUrl.host.toLowerCase() === host.toLowerCase();
+    } catch {
+      return false;
+    }
   }
 
   private async handleSocketMessage(session: BrowserSession, raw: string): Promise<void> {

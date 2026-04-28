@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -24,7 +24,6 @@ describeAppServerBridge(({ children }) => {
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
-
     await bridge.forwardBridgeMessage({
       type: "fetch",
       requestId: "fetch-os",
@@ -137,7 +136,6 @@ describeAppServerBridge(({ children }) => {
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
-
     await bridge.forwardBridgeMessage({
       type: "fetch",
       requestId: "fetch-thread-title",
@@ -158,6 +156,43 @@ describeAppServerBridge(({ children }) => {
     expect(getFetchJsonBody(emittedMessages, "fetch-thread-title")).toEqual({
       title: "explore this repo and report back the main entry points and…",
     });
+
+    await bridge.close();
+  });
+
+  it("returns a projectless thread cwd and output directory for new chat startup", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+
+    const bridge = await createBridge(children, { codexHomePath: codexHome });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-projectless-thread-cwd",
+      method: "POST",
+      url: "vscode://codex/projectless-thread-cwd",
+      body: JSON.stringify({
+        params: {
+          prompt: "say connected",
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-projectless-thread-cwd")),
+    );
+
+    const outputDirectory = join(codexHome, "pocodex", "projectless-output");
+    expect(getFetchJsonBody(emittedMessages, "fetch-projectless-thread-cwd")).toEqual({
+      cwd: TEST_WORKSPACE_ROOT,
+      outputDirectory,
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+    });
+    expect((await stat(outputDirectory)).isDirectory()).toBe(true);
 
     await bridge.close();
   });
@@ -204,7 +239,6 @@ description: Review lint issues quickly.
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
-
     await bridge.forwardBridgeMessage({
       type: "fetch",
       requestId: "fetch-recommended-skills",
@@ -305,12 +339,14 @@ description: Review lint issues quickly.
   });
 
   it("reads skill contents through the webview read-file contract", async () => {
-    const skillDirectory = await mkdtemp(join(tmpdir(), "pocodex-skill-"));
-    tempDirs.push(skillDirectory);
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+    const skillDirectory = join(codexHome, "vendor_imports", "skills", "demo");
+    await mkdir(skillDirectory, { recursive: true });
     const skillPath = join(skillDirectory, "SKILL.md");
     await writeFile(skillPath, "# Demo Skill\n\nUse concise output.\n", "utf8");
 
-    const bridge = await createBridge(children);
+    const bridge = await createBridge(children, { codexHomePath: codexHome });
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
@@ -334,6 +370,120 @@ description: Review lint issues quickly.
       path: skillPath,
       contents: "# Demo Skill\n\nUse concise output.\n",
     });
+
+    await bridge.close();
+  });
+
+  it("allows read-file under a registered workspace and rejects unsafe paths", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-read-file-"));
+    tempDirs.push(tempDirectory);
+    const projectRoot = join(tempDirectory, "project-read-file");
+    await mkdir(projectRoot, { recursive: true });
+    const workspaceFile = join(projectRoot, "README.md");
+    await writeFile(workspaceFile, "# Project\n", "utf8");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+    await registerWorkspaceRoot(bridge, emittedMessages, projectRoot);
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-read-file-workspace",
+      method: "POST",
+      url: "vscode://codex/read-file",
+      body: JSON.stringify({
+        params: {
+          path: workspaceFile,
+        },
+      }),
+    });
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-read-file-outside",
+      method: "POST",
+      url: "vscode://codex/read-file",
+      body: JSON.stringify({
+        params: {
+          path: "/etc/hosts",
+        },
+      }),
+    });
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-read-file-directory",
+      method: "POST",
+      url: "vscode://codex/read-file",
+      body: JSON.stringify({
+        params: {
+          path: projectRoot,
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-read-file-directory")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-read-file-workspace")).toEqual({
+      path: workspaceFile,
+      contents: "# Project\n",
+    });
+    expect(getFetchResponse(emittedMessages, "fetch-read-file-outside")).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-read-file-outside",
+      responseType: "error",
+      status: 403,
+      error: "File path is outside Pocodex's allowed read roots.",
+    });
+    expect(getFetchResponse(emittedMessages, "fetch-read-file-directory")).toMatchObject({
+      type: "fetch-response",
+      requestId: "fetch-read-file-directory",
+      responseType: "error",
+      status: 400,
+      error: "File path must point to a file.",
+    });
+
+    await bridge.close();
+  });
+
+  it("rejects unsupported browser bridge fetch URLs without proxying them", async () => {
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    const urls = [
+      "http://127.0.0.1:8080/status",
+      "http://192.168.1.20/admin",
+      "http://169.254.169.254/latest/meta-data",
+      "file:///etc/hosts",
+      "https://example.com/api",
+    ];
+
+    for (const [index, url] of urls.entries()) {
+      await bridge.forwardBridgeMessage({
+        type: "fetch",
+        requestId: `fetch-unsupported-${index}`,
+        method: "GET",
+        url,
+      });
+    }
+
+    await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, "fetch-unsupported-4")));
+
+    for (const [index, url] of urls.entries()) {
+      expect(getFetchResponse(emittedMessages, `fetch-unsupported-${index}`)).toMatchObject({
+        type: "fetch-response",
+        requestId: `fetch-unsupported-${index}`,
+        responseType: "error",
+        status: 501,
+        error: `Unsupported absolute fetch URL: ${url}`,
+      });
+    }
 
     await bridge.close();
   });
@@ -408,6 +558,7 @@ description: Review lint issues quickly.
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
+    await registerWorkspaceRoot(bridge, emittedMessages, projectRoot);
 
     await bridge.forwardBridgeMessage({
       type: "fetch",
@@ -480,6 +631,7 @@ description: Review lint issues quickly.
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
+    await registerWorkspaceRoot(bridge, emittedMessages, projectRoot);
 
     await bridge.forwardBridgeMessage({
       type: "fetch",
@@ -563,6 +715,7 @@ description: Review lint issues quickly.
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
     });
+    await registerWorkspaceRoot(bridge, emittedMessages, projectRoot);
 
     await bridge.forwardBridgeMessage({
       type: "fetch",
@@ -687,4 +840,70 @@ description: Review lint issues quickly.
 
     await bridge.close();
   });
+
+  it("rejects local environment config paths outside registered workspace roots", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-local-environments-"));
+    tempDirs.push(tempDirectory);
+    const projectRoot = join(tempDirectory, "project-zeta");
+    const outsideRoot = join(tempDirectory, "outside-project");
+    await mkdir(projectRoot, { recursive: true });
+    await mkdir(join(outsideRoot, ".codex", "environments"), { recursive: true });
+    const outsideEnvironmentPath = join(outsideRoot, ".codex", "environments", "environment.toml");
+
+    const bridge = await createBridge(children);
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+    await registerWorkspaceRoot(bridge, emittedMessages, projectRoot);
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-local-environment-outside-save",
+      method: "POST",
+      url: "vscode://codex/local-environment-config-save",
+      body: JSON.stringify({
+        params: {
+          configPath: outsideEnvironmentPath,
+          raw: 'name = "Outside"\nversion = 1\n',
+        },
+      }),
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-local-environment-outside-save")),
+    );
+
+    expect(getFetchResponse(emittedMessages, "fetch-local-environment-outside-save")).toMatchObject(
+      {
+        type: "fetch-response",
+        requestId: "fetch-local-environment-outside-save",
+        responseType: "error",
+        status: 403,
+        error: "Local environment config path is outside registered workspace roots.",
+      },
+    );
+
+    await bridge.close();
+  });
 });
+
+async function registerWorkspaceRoot(
+  bridge: {
+    forwardBridgeMessage: (message: unknown) => Promise<void>;
+  },
+  emittedMessages: unknown[],
+  root: string,
+): Promise<void> {
+  const requestId = `register-workspace-root:${root}`;
+  await bridge.forwardBridgeMessage({
+    type: "fetch",
+    requestId,
+    method: "POST",
+    url: "vscode://codex/add-workspace-root-option",
+    body: JSON.stringify({
+      root,
+    }),
+  });
+  await waitForCondition(() => Boolean(getFetchResponse(emittedMessages, requestId)));
+}

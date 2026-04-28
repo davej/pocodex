@@ -548,6 +548,7 @@ function createBootstrapHarness(
   options: {
     href?: string;
     localStorageEntries?: Record<string, string>;
+    sessionStorageEntries?: Record<string, string>;
     mobile?: boolean;
   } = {},
 ) {
@@ -555,7 +556,9 @@ function createBootstrapHarness(
   const localStorageEntries = new Map<string, string>(
     Object.entries(options.localStorageEntries ?? {}),
   );
-  const sessionStorageEntries = new Map<string, string>();
+  const sessionStorageEntries = new Map<string, string>(
+    Object.entries(options.sessionStorageEntries ?? {}),
+  );
   const serviceWorkerRegistrations: Array<{
     scriptUrl: string;
     options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" };
@@ -786,6 +789,9 @@ function createBootstrapHarness(
     getLocalStorageValue(key: string): string | null {
       return localStorageEntries.get(key) ?? null;
     },
+    getSessionStorageValue(key: string): string | null {
+      return sessionStorageEntries.get(key) ?? null;
+    },
     getServiceWorkerRegistrations(): Array<{
       scriptUrl: string;
       options?: { scope?: string; updateViaCache?: "all" | "imports" | "none" };
@@ -951,7 +957,7 @@ describe("renderBootstrapScript", () => {
     expect(harness.document.documentElement.dataset.pocodexSettingsShell).toBe("true");
   });
 
-  it("persists the session token for standalone launches without a token query", () => {
+  it("stores the session token only for the current browser session", () => {
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -965,11 +971,12 @@ describe("renderBootstrapScript", () => {
 
     const firstHarness = createBootstrapHarness();
     firstHarness.run(script);
-    expect(firstHarness.getLocalStorageValue("__pocodex_token")).toBe("secret");
+    expect(firstHarness.getSessionStorageValue("__pocodex_token")).toBe("secret");
+    expect(firstHarness.getLocalStorageValue("__pocodex_token")).toBeNull();
 
     const standaloneHarness = createBootstrapHarness({
       href: "http://127.0.0.1:8787/",
-      localStorageEntries: {
+      sessionStorageEntries: {
         __pocodex_token: "secret",
       },
     });
@@ -977,6 +984,35 @@ describe("renderBootstrapScript", () => {
 
     expect(standaloneHarness.fetchCalls).toContainEqual({
       input: "/session-check?token=secret",
+      init: {
+        cache: "no-store",
+        credentials: "same-origin",
+      },
+    });
+  });
+
+  it("ignores stale tokens stored only in localStorage", () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+      importIconSvg: '<svg viewBox="0 0 1 1"></svg>',
+    });
+
+    const harness = createBootstrapHarness({
+      href: "http://127.0.0.1:8787/",
+      localStorageEntries: {
+        __pocodex_token: "secret",
+      },
+    });
+    harness.run(script);
+
+    expect(harness.fetchCalls).toContainEqual({
+      input: "/session-check",
       init: {
         cache: "no-store",
         credentials: "same-origin",
@@ -1235,7 +1271,7 @@ describe("renderBootstrapScript", () => {
     });
 
     expect(fetchCalls.at(-1)).toEqual({
-      input: "/ipc-request",
+      input: "/ipc-request?token=secret",
       init: {
         method: "POST",
         body: '{"method":"ping"}',
@@ -2853,7 +2889,7 @@ describe("renderBootstrapScript", () => {
     expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("expanded");
   });
 
-  it("defaults the mobile sidebar to expanded when no host mode has been stored", async () => {
+  it("does not force a stored expanded mobile sidebar mode onto an already-closed shell", async () => {
     const script = renderBootstrapScript({
       sentryOptions: {
         buildFlavor: "stable",
@@ -2891,7 +2927,172 @@ describe("renderBootstrapScript", () => {
     });
 
     drainTestTimers(harness.timers, 1);
-    expect(harness.dispatchedMessages).toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
+  });
+
+  it("does not force the mobile sidebar open when no mode has been stored", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({ mobile: true });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    harness.emitServerEnvelope({
+      type: "bridge_message",
+      message: {
+        type: "persisted-atom-sync",
+        state: {},
+      },
+    });
+    drainTestTimers(harness.timers);
+    harness.dispatchedMessages.length = 0;
+
+    setMobileSidebarClosedState(contentPane, navigation);
+    harness.windowObject.dispatchEvent({ type: "resize" });
+    drainTestTimers(harness.timers);
+
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBeNull();
+  });
+
+  it("persists mobile sidebar closes from close-labeled toggle buttons", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "expanded",
+      },
+    });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    const closeButton = harness.document.createElement("button");
+    closeButton.setAttribute("aria-label", "Close sidebar");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    harness.document.body.appendChild(closeButton);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+
+    drainTestTimers(harness.timers);
+    harness.dispatchedMessages.length = 0;
+
+    harness.document.dispatchEvent(new TestMouseEvent("click", { target: closeButton }));
+    setMobileSidebarClosedState(contentPane, navigation);
+    drainTestTimers(harness.timers);
+
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
+  });
+
+  it("persists mobile sidebar toggles sent through the electron bridge", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "expanded",
+      },
+    });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+    drainTestTimers(harness.timers);
+
+    await harness.getElectronBridge().sendMessageFromView({
+      type: "toggle-sidebar",
+    });
+    setMobileSidebarClosedState(contentPane, navigation);
+    drainTestTimers(harness.timers);
+
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+  });
+
+  it("does not force a stored expanded mobile sidebar mode back open after the shell closes", async () => {
+    const script = renderBootstrapScript({
+      sentryOptions: {
+        buildFlavor: "stable",
+        appVersion: "1",
+        buildNumber: "123",
+        codexAppSessionId: "session-id",
+      },
+      stylesheetHref: "/pocodex.css",
+    });
+
+    const harness = createBootstrapHarness({
+      mobile: true,
+      localStorageEntries: {
+        "pocodex-sidebar-mode": "expanded",
+      },
+    });
+    const navigation = harness.document.createElement("nav");
+    navigation.setAttribute("role", "navigation");
+    const contentPane = harness.document.createElement("div");
+    contentPane.setAttribute("class", "main-surface");
+    harness.document.body.appendChild(navigation);
+    harness.document.body.appendChild(contentPane);
+    setMobileSidebarOpenState(contentPane, navigation);
+
+    harness.run(script);
+    await flushBootstrapMicrotasks();
+    harness.openSocket();
+    drainTestTimers(harness.timers);
+    harness.dispatchedMessages.length = 0;
+
+    setMobileSidebarClosedState(contentPane, navigation);
+    harness.windowObject.dispatchEvent({ type: "resize" });
+    drainTestTimers(harness.timers);
+
+    expect(harness.dispatchedMessages).not.toContainEqual({ type: "toggle-sidebar" });
+    expect(harness.getLocalStorageValue("pocodex-sidebar-mode")).toBe("collapsed");
   });
 
   it("persists mobile sidebar closes triggered from the content pane", async () => {

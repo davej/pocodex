@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -410,8 +410,61 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("hydrates and persists pinned threads through Codex Desktop global state", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-pinned-threads-"));
+    tempDirs.push(tempDirectory);
+    const codexHome = join(tempDirectory, "codex-home");
+    await mkdir(codexHome, { recursive: true });
+    const globalStatePath = join(codexHome, ".codex-global-state.json");
+    await writeFile(
+      globalStatePath,
+      JSON.stringify({
+        "pinned-thread-ids": ["thr_existing"],
+      }),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children, {
+      codexHomePath: codexHome,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-pins",
+      method: "POST",
+      url: "vscode://codex/list-pinned-threads",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "pin-new",
+      method: "POST",
+      url: "vscode://codex/set-thread-pinned",
+      body: JSON.stringify({ threadId: "thr_new", pinned: true }),
+    });
+
+    await waitForCondition(() => emittedMessages.length >= 3);
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-pins")).toEqual({
+      threadIds: ["thr_existing"],
+    });
+
+    await bridge.close();
+
+    await expect(readFile(globalStatePath, "utf8").then(JSON.parse)).resolves.toMatchObject({
+      "pinned-thread-ids": ["thr_existing", "thr_new"],
+    });
+  });
+
   it("publishes shared object updates and opens the onboarding workspace picker", async () => {
-    const bridge = await createBridge(children);
+    const codexHome = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHome);
+
+    const bridge = await createBridge(children, { codexHomePath: codexHome });
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
       emittedMessages.push(message);
