@@ -227,20 +227,42 @@ describe("PocodexServer", () => {
     await expect(unauthorizedResponse.json()).resolves.toEqual({ ok: false });
   });
 
-  it("allows unauthenticated session checks and websocket attach when no token is configured", async () => {
+  it("rejects session checks and websocket attach when no token is configured", async () => {
     const { server, url } = await createTestServer("");
     servers.push(server);
 
     const okResponse = await fetch(`${url}/session-check`);
     const tokenResponse = await fetch(`${url}/session-check?token=anything`);
 
-    expect(okResponse.status).toBe(200);
-    await expect(okResponse.json()).resolves.toEqual({ ok: true });
+    expect(okResponse.status).toBe(401);
+    await expect(okResponse.json()).resolves.toEqual({ ok: false });
 
-    expect(tokenResponse.status).toBe(200);
-    await expect(tokenResponse.json()).resolves.toEqual({ ok: true });
+    expect(tokenResponse.status).toBe(401);
+    await expect(tokenResponse.json()).resolves.toEqual({ ok: false });
 
-    const socket = await connect(url);
+    await expect(connect(url)).rejects.toThrow("Unexpected server response: 401");
+  });
+
+  it("rejects websocket attach from a mismatched browser origin", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+    const port = new URL(url).port;
+
+    await expect(
+      connect(url, "secret", {
+        origin: `http://evil.example:${port}`,
+      }),
+    ).rejects.toThrow("Unexpected server response: 403");
+  });
+
+  it("allows websocket attach from the matching origin", async () => {
+    const { server, url } = await createTestServer();
+    servers.push(server);
+
+    const socket = await connect(url, "secret", {
+      origin: url,
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
     socket.close();
   });
 
@@ -693,7 +715,7 @@ describe("PocodexServer", () => {
     const { server, relay, url } = await createTestServer();
     servers.push(server);
 
-    const response = await fetch(`${url}/ipc-request`, {
+    const response = await fetch(`${url}/ipc-request?token=secret`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -724,6 +746,31 @@ describe("PocodexServer", () => {
       result: {
         ok: true,
       },
+    });
+  });
+
+  it("rejects vscode ipc requests without the session token", async () => {
+    const { server, relay, url } = await createTestServer();
+    servers.push(server);
+
+    const response = await fetch(`${url}/ipc-request`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        requestId: "req-1",
+        method: "thread-follower-start-turn",
+      }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(relay.ipcPayloads).toEqual([]);
+    await expect(response.json()).resolves.toEqual({
+      requestId: "",
+      type: "response",
+      resultType: "error",
+      error: "Unauthorized IPC request.",
     });
   });
 });
@@ -779,12 +826,20 @@ async function createTestServer(
   };
 }
 
-async function connect(baseUrl: string, token?: string): Promise<WebSocket> {
+async function connect(
+  baseUrl: string,
+  token?: string,
+  options: {
+    origin?: string;
+  } = {},
+): Promise<WebSocket> {
   const url = new URL(`${baseUrl.replace(/^http/, "ws")}/session`);
   if (token) {
     url.searchParams.set("token", token);
   }
-  const socket = new WebSocket(url);
+  const socket = new WebSocket(url, {
+    origin: options.origin,
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once("open", () => resolve());
     socket.once("error", reject);

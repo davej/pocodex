@@ -2,12 +2,18 @@ import { randomUUID } from "node:crypto";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { ensureCodexCliBinary } from "./codex-bundle.js";
+import {
+  loadCodexDesktopState,
+  saveCodexDesktopPinnedThreadIds,
+  type CodexDesktopProject,
+  type LoadedCodexDesktopState,
+} from "./codex-desktop-projects.js";
 import { deriveCodexHomePath } from "./codex-home.js";
 import {
   DefaultCodexDesktopGitWorkerBridge,
@@ -291,12 +297,14 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
   private readonly codexHomePath: string;
+  private desktopGlobalStatePath: string;
   private persistedAtomRegistryPath: string;
   private workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
   private activeWorkspaceRoot: string | null;
   private desktopImportPromptSeen = false;
   private persistedAtomWritePromise: Promise<void> = Promise.resolve();
+  private desktopGlobalStateWritePromise: Promise<void> = Promise.resolve();
   private nextRequestId = 0;
   private isClosing = false;
   private isInitialized = false;
@@ -318,6 +326,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
     this.codexHomePath = options.codexHomePath ?? deriveCodexHomePath();
+    this.desktopGlobalStatePath = join(this.codexHomePath, ".codex-global-state.json");
     this.persistedAtomRegistryPath =
       options.persistedAtomRegistryPath ?? derivePersistedAtomRegistryPath();
     this.workspaceRootRegistryPath =
@@ -408,6 +417,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     await this.persistedAtomWritePromise.catch(() => undefined);
+    await this.desktopGlobalStateWritePromise.catch(() => undefined);
   }
 
   async forwardBridgeMessage(message: unknown): Promise<void> {
@@ -836,12 +846,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async restoreWorkspaceRootRegistry(): Promise<void> {
+    const desktopState = await this.loadDesktopState();
+    this.applyDesktopPinnedThreadIds(desktopState.pinnedThreadIds);
+
     try {
       const loaded = await loadWorkspaceRootRegistry(this.workspaceRootRegistryPath);
       this.workspaceRootRegistryPath = loaded.path;
       if (loaded.state) {
         this.desktopImportPromptSeen = loaded.state.desktopImportPromptSeen;
         this.applyWorkspaceRootRegistry(loaded.state);
+      }
+      if (!loaded.state || loaded.state.roots.length === 0) {
+        await this.importDesktopWorkspaceRoots(desktopState.projects);
+      } else {
+        await this.reconcileDesktopWorkspaceRoots(desktopState.projects);
       }
     } catch (error) {
       debugLog("app-server", "failed to restore workspace root registry", {
@@ -851,6 +869,83 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     this.syncWorkspaceGlobalState();
+  }
+
+  private async loadDesktopState(): Promise<LoadedCodexDesktopState> {
+    try {
+      const loaded = await loadCodexDesktopState(this.desktopGlobalStatePath);
+      if (loaded.found) {
+        this.desktopGlobalStatePath = loaded.path;
+      }
+      return loaded;
+    } catch (error) {
+      debugLog("app-server", "failed to load Codex desktop state", {
+        error: normalizeError(error).message,
+      });
+      return {
+        found: false,
+        path: this.desktopGlobalStatePath,
+        projects: [],
+        pinnedThreadIds: [],
+      };
+    }
+  }
+
+  private applyDesktopPinnedThreadIds(threadIds: string[]): void {
+    this.pinnedThreadIds.clear();
+    for (const threadId of threadIds) {
+      this.pinnedThreadIds.add(threadId);
+    }
+    this.globalState.set("pinned-thread-ids", Array.from(this.pinnedThreadIds));
+  }
+
+  private async importDesktopWorkspaceRoots(projects: CodexDesktopProject[]): Promise<void> {
+    const availableProjects = projects.filter((project) => project.available);
+    if (availableProjects.length === 0) {
+      return;
+    }
+
+    this.applyDesktopWorkspaceProjects(availableProjects, []);
+    await this.persistWorkspaceRootRegistry();
+  }
+
+  private async reconcileDesktopWorkspaceRoots(projects: CodexDesktopProject[]): Promise<void> {
+    const availableProjects = projects.filter((project) => project.available);
+    if (availableProjects.length === 0) {
+      return;
+    }
+
+    this.applyDesktopWorkspaceProjects(availableProjects, Array.from(this.workspaceRoots));
+    await this.persistWorkspaceRootRegistry();
+  }
+
+  private applyDesktopWorkspaceProjects(
+    desktopProjects: CodexDesktopProject[],
+    existingRoots: string[],
+  ): void {
+    const desktopRoots = desktopProjects.map((project) => project.root);
+    const desktopRootSet = new Set(desktopRoots);
+    const browserOnlyRoots = existingRoots.filter((root) => !desktopRootSet.has(root));
+    const roots = [...desktopRoots, ...browserOnlyRoots];
+    const labels = Object.fromEntries(this.workspaceRootLabels);
+
+    for (const project of desktopProjects) {
+      labels[project.root] = project.label;
+    }
+
+    const activeProject = desktopProjects.find((project) => project.active);
+    const activeRoot =
+      activeProject?.root ??
+      (this.activeWorkspaceRoot && roots.includes(this.activeWorkspaceRoot)
+        ? this.activeWorkspaceRoot
+        : (roots[0] ?? null));
+
+    this.applyWorkspaceRootRegistry({
+      roots,
+      labels,
+      activeRoot,
+      desktopImportPromptSeen: true,
+    });
   }
 
   private async restorePersistedAtomRegistry(): Promise<void> {
@@ -1538,53 +1633,22 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           return;
         }
 
-        const response = await fetch(new URL(message.url, "https://chatgpt.com"), {
-          method: typeof message.method === "string" ? message.method : "GET",
-          headers: buildOutboundFetchHeaders(message.headers, message.body),
-          body: normalizeRequestBody(message.body),
-          signal: controller.signal,
-        });
-        const handledResponse = await readRemoteFetchResponse(response);
-        if (controller.signal.aborted) {
-          return;
-        }
-
-        this.emit("bridge_message", {
-          type: "fetch-response",
-          requestId: message.requestId,
-          responseType: "success",
-          status: handledResponse.status,
-          headers: handledResponse.headers,
-          bodyJsonString: JSON.stringify(handledResponse.body),
-        });
+        this.emitFetchError(
+          message.requestId,
+          501,
+          `Unsupported relative fetch URL: ${message.url}`,
+        );
         return;
       }
 
-      const response = await fetch(message.url, {
-        method: typeof message.method === "string" ? message.method : "GET",
-        headers: buildOutboundFetchHeaders(message.headers, message.body),
-        body: normalizeRequestBody(message.body),
-        signal: controller.signal,
-      });
-      const handledResponse = await readRemoteFetchResponse(response);
-      if (controller.signal.aborted) {
-        return;
-      }
-
-      this.emit("bridge_message", {
-        type: "fetch-response",
-        requestId: message.requestId,
-        responseType: "success",
-        status: handledResponse.status,
-        headers: handledResponse.headers,
-        bodyJsonString: JSON.stringify(handledResponse.body),
-      });
+      this.emitFetchError(message.requestId, 501, `Unsupported absolute fetch URL: ${message.url}`);
     } catch (error) {
       if (controller.signal.aborted) {
         return;
       }
       const normalized = normalizeError(error);
-      this.emitFetchError(message.requestId, 500, normalized.message);
+      const status = error instanceof ForbiddenPathError ? 403 : 500;
+      this.emitFetchError(message.requestId, status, normalized.message);
     } finally {
       this.fetchRequests.delete(message.requestId);
     }
@@ -1787,6 +1851,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           body: {
             roots: this.getActiveWorkspaceRoots(),
           },
+        };
+      case "projectless-thread-cwd":
+        return {
+          status: 200,
+          body: await this.readProjectlessThreadCwd(),
         };
       case "workspace-root-options":
         return {
@@ -2379,21 +2448,23 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleLocalEnvironmentsRequest(body: unknown): Promise<unknown> {
-    const workspaceRoot =
-      readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot ?? this.cwd;
+    const workspaceRoot = this.resolveAllowedWorkspaceRoot(
+      readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot,
+    );
     return await listLocalEnvironments(workspaceRoot);
   }
 
   private async handleLocalEnvironmentConfigRequest(body: unknown): Promise<unknown> {
     const configPath = readLocalEnvironmentConfigPath(body);
     if (configPath) {
-      return await readLocalEnvironmentConfig(configPath);
+      return await readLocalEnvironmentConfig(
+        this.resolveAllowedLocalEnvironmentConfigPath(configPath),
+      );
     }
 
-    const workspaceRoot = readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot;
-    if (!workspaceRoot) {
-      throw new Error("Local environment workspace root is required.");
-    }
+    const workspaceRoot = this.resolveAllowedWorkspaceRoot(
+      readLocalEnvironmentWorkspaceRoot(body) ?? this.activeWorkspaceRoot,
+    );
 
     return await readLocalEnvironmentConfig(
       join(workspaceRoot, ".codex", "environments", "environment.toml"),
@@ -2406,7 +2477,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       throw new Error("Local environment config path is required.");
     }
 
-    return await loadLocalEnvironment(configPath);
+    return await loadLocalEnvironment(this.resolveAllowedLocalEnvironmentConfigPath(configPath));
   }
 
   private async handleLocalEnvironmentConfigSaveRequest(body: unknown): Promise<unknown> {
@@ -2420,7 +2491,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       throw new Error("Local environment config contents are required.");
     }
 
-    return await saveLocalEnvironmentConfig(configPath, raw);
+    return await saveLocalEnvironmentConfig(
+      this.resolveAllowedLocalEnvironmentConfigPath(configPath),
+      raw,
+    );
   }
 
   private async readCodexAgentsMarkdown(): Promise<{
@@ -2475,10 +2549,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
     let resolvedPath: string;
     try {
-      resolvedPath = normalizeCodexReadFilePath(path);
+      resolvedPath = await this.resolveAllowedCodexReadFilePath(path);
     } catch (error) {
+      const status = error instanceof ForbiddenPathError ? 403 : 400;
       return {
-        status: 400,
+        status,
         body: {
           error: normalizeError(error).message,
         },
@@ -2524,6 +2599,65 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
       throw error;
     }
+  }
+
+  private async resolveAllowedCodexReadFilePath(path: string): Promise<string> {
+    const resolvedPath = normalizeCodexReadFilePath(path);
+    if (!isPathInsideAnyRoot(resolvedPath, this.getAllowedReadRoots())) {
+      throw new ForbiddenPathError("File path is outside Pocodex's allowed read roots.");
+    }
+
+    const realPath = await realpath(resolvedPath).catch(() => resolvedPath);
+    if (!isPathInsideAnyRoot(realPath, await this.getRealAllowedReadRoots())) {
+      throw new ForbiddenPathError("File path is outside Pocodex's allowed read roots.");
+    }
+
+    return resolvedPath;
+  }
+
+  private resolveAllowedWorkspaceRoot(path: string | null): string {
+    if (!path) {
+      throw new Error("Local environment workspace root is required.");
+    }
+
+    const resolvedPath = normalizeAbsoluteHostPath(path, "Local environment workspace root");
+    if (!isPathInsideAnyRoot(resolvedPath, this.getRegisteredWorkspaceRoots())) {
+      throw new ForbiddenPathError(
+        "Local environment workspace root is not registered in Pocodex.",
+      );
+    }
+
+    return resolvedPath;
+  }
+
+  private resolveAllowedLocalEnvironmentConfigPath(path: string): string {
+    const resolvedPath = normalizeLocalEnvironmentConfigHostPath(path);
+    if (!isPathInsideAnyRoot(resolvedPath, this.getRegisteredWorkspaceRoots())) {
+      throw new ForbiddenPathError(
+        "Local environment config path is outside registered workspace roots.",
+      );
+    }
+
+    return resolvedPath;
+  }
+
+  private getAllowedReadRoots(): string[] {
+    return uniqueStrings([
+      ...this.getRegisteredWorkspaceRoots(),
+      this.codexHomePath,
+      dirname(this.persistedAtomRegistryPath),
+      dirname(this.workspaceRootRegistryPath),
+    ]).map((root) => resolve(root));
+  }
+
+  private async getRealAllowedReadRoots(): Promise<string[]> {
+    return await Promise.all(
+      this.getAllowedReadRoots().map(async (root) => await realpath(root).catch(() => root)),
+    );
+  }
+
+  private getRegisteredWorkspaceRoots(): string[] {
+    return Array.from(this.workspaceRoots).map((root) => resolve(root));
   }
 
   private readDeveloperInstructions(body: unknown): string | null {
@@ -2620,6 +2754,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
           this.pinnedThreadIds.add(value);
         }
       }
+      this.queueDesktopPinnedThreadIdsWrite();
       this.emitBridgeMessage({
         type: "pinned-threads-updated",
       });
@@ -2649,6 +2784,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     this.globalState.set("pinned-thread-ids", Array.from(this.pinnedThreadIds));
+    this.queueDesktopPinnedThreadIdsWrite();
     this.emitBridgeMessage({
       type: "pinned-threads-updated",
     });
@@ -2671,10 +2807,27 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     this.globalState.set("pinned-thread-ids", Array.from(this.pinnedThreadIds));
+    this.queueDesktopPinnedThreadIdsWrite();
     this.emitBridgeMessage({
       type: "pinned-threads-updated",
     });
     return {};
+  }
+
+  private queueDesktopPinnedThreadIdsWrite(): void {
+    const threadIds = Array.from(this.pinnedThreadIds);
+    this.desktopGlobalStateWritePromise = this.desktopGlobalStateWritePromise
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await saveCodexDesktopPinnedThreadIds(this.desktopGlobalStatePath, threadIds);
+        } catch (error) {
+          debugLog("app-server", "failed to persist desktop pinned thread ids", {
+            error: normalizeError(error).message,
+            path: this.desktopGlobalStatePath,
+          });
+        }
+      });
   }
 
   private async addWorkspaceRootOption(body: unknown): Promise<{
@@ -2833,6 +2986,21 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     return roots;
+  }
+
+  private async readProjectlessThreadCwd(): Promise<{
+    cwd: string;
+    outputDirectory: string;
+    workspaceRoot: string;
+  }> {
+    const workspaceRoot = this.getActiveWorkspaceRoots()[0] ?? this.cwd;
+    const outputDirectory = join(this.codexHomePath, "pocodex", "projectless-output");
+    await mkdir(outputDirectory, { recursive: true });
+    return {
+      cwd: workspaceRoot,
+      outputDirectory,
+      workspaceRoot,
+    };
   }
 
   private getGitOriginFallbackDirectories(): string[] {
@@ -4215,9 +4383,7 @@ function convertWorkspaceRootWslUncPathToLinux(path: string): string | null {
 }
 
 function isRunningInWsl(): boolean {
-  return (
-    process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
-  );
+  return Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
 }
 
 function normalizeWorkspaceRootPickerPathError(error: unknown): Error {
@@ -4584,6 +4750,54 @@ function normalizeCodexReadFilePath(path: string): string {
   }
 
   return resolve(expandedPath);
+}
+
+class ForbiddenPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ForbiddenPathError";
+  }
+}
+
+function normalizeAbsoluteHostPath(path: string, label: string): string {
+  const trimmedPath = path.trim();
+  if (trimmedPath.length === 0) {
+    throw new Error(`${label} is required.`);
+  }
+
+  const expandedPath = normalizeWorkspaceRootHostPath(expandWorkspaceRootPickerHome(trimmedPath));
+  if (!isAbsolute(expandedPath)) {
+    throw new Error(`${label} must be absolute.`);
+  }
+
+  return resolve(expandedPath);
+}
+
+function normalizeLocalEnvironmentConfigHostPath(path: string): string {
+  const normalizedPath = normalizeAbsoluteHostPath(path, "Local environment config path");
+  const environmentsDirectory = dirname(normalizedPath);
+  const codexDirectory = dirname(environmentsDirectory);
+
+  if (
+    basename(normalizedPath) !== "environment.toml" ||
+    basename(environmentsDirectory) !== "environments" ||
+    basename(codexDirectory) !== ".codex"
+  ) {
+    throw new Error("Invalid local environment config path.");
+  }
+
+  return normalizedPath;
+}
+
+function isPathInsideAnyRoot(path: string, roots: string[]): boolean {
+  const resolvedPath = resolve(path);
+  return roots.some((root) => isPathInsideRoot(resolvedPath, root));
+}
+
+function isPathInsideRoot(path: string, root: string): boolean {
+  const resolvedRoot = resolve(root);
+  const relativePath = relative(resolvedRoot, path);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 function readFetchErrorMessage(body: unknown, fallback: string): string {

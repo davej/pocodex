@@ -276,11 +276,16 @@ export async function createBridge(
     tempDirs.push(tempDirectory);
     workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
   }
+  let codexHomePath = options.codexHomePath ?? process.env.CODEX_HOME;
+  if (!codexHomePath) {
+    codexHomePath = await mkdtemp(join(tmpdir(), "pocodex-codex-home-"));
+    tempDirs.push(codexHomePath);
+  }
   return AppServerBridge.connect({
     appPath: "/Applications/Codex.app",
     codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
-    codexHomePath: options.codexHomePath,
+    codexHomePath,
     persistedAtomRegistryPath: options.persistedAtomRegistryPath,
     workspaceRootRegistryPath,
     gitWorkerBridge: options.gitWorkerBridge,

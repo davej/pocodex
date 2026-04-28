@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
@@ -173,7 +173,7 @@ async function parseServeCommand(argv: string[]): Promise<ServeCommandOptions> {
 
   const appPath = readFlag(argv, "--app") ?? (await resolveDefaultCodexAppPath());
   const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
-  const token = readFlag(argv, "--token") ?? "";
+  const token = readFlag(argv, "--token") ?? randomBytes(32).toString("hex");
   const devMode = hasFlag(argv, "--dev");
 
   const parsedListenAddress = parseListenAddress(listen);

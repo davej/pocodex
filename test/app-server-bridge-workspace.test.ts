@@ -21,6 +21,8 @@ describeAppServerBridge(({ children }) => {
   it("treats a missing workspace registry as pristine with no projects", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
     tempDirs.push(tempDirectory);
+    const codexHome = join(tempDirectory, "codex-home");
+    await mkdir(codexHome, { recursive: true });
     const workspaceRootRegistryPath = join(tempDirectory, "workspace-roots.json");
     mockLocalThreadList.data = [
       {
@@ -34,6 +36,7 @@ describeAppServerBridge(({ children }) => {
     ];
 
     const bridge = await createBridge(children, {
+      codexHomePath: codexHome,
       workspaceRootRegistryPath,
     });
     const emittedMessages: unknown[] = [];
@@ -67,6 +70,201 @@ describeAppServerBridge(({ children }) => {
     });
 
     expect(children.at(-1)?.writes ?? "").not.toContain('"method":"thread/list"');
+
+    await bridge.close();
+  });
+
+  it("imports Codex Desktop workspace roots when the Pocodex registry is missing", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
+    tempDirs.push(tempDirectory);
+    const codexHome = join(tempDirectory, "codex-home");
+    const workspaceRootRegistryPath = join(codexHome, "pocodex", "workspace-roots.json");
+    const projectAlpha = join(tempDirectory, "project-alpha");
+    const projectBeta = join(tempDirectory, "project-beta");
+    const missingProject = join(tempDirectory, "missing-project");
+    await mkdir(projectAlpha, { recursive: true });
+    await mkdir(projectBeta, { recursive: true });
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      join(codexHome, ".codex-global-state.json"),
+      JSON.stringify({
+        "electron-saved-workspace-roots": [projectAlpha, missingProject, projectBeta],
+        "active-workspace-roots": [projectBeta],
+        "electron-workspace-root-labels": {
+          [projectAlpha]: "Alpha",
+          [projectBeta]: "Beta",
+        },
+      }),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children, {
+      codexHomePath: codexHome,
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-active-roots",
+      method: "POST",
+      url: "vscode://codex/active-workspace-roots",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-root-options",
+      method: "POST",
+      url: "vscode://codex/workspace-root-options",
+    });
+
+    await waitForCondition(() => emittedMessages.length >= 2);
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-active-roots")).toEqual({
+      roots: [projectBeta, projectAlpha],
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-root-options")).toEqual({
+      roots: [projectAlpha, projectBeta],
+      labels: {
+        [projectAlpha]: "Alpha",
+        [projectBeta]: "Beta",
+      },
+    });
+    await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.toContain(
+      `"activeRoot": "${projectBeta}"`,
+    );
+    await expect(readFile(workspaceRootRegistryPath, "utf8")).resolves.not.toContain(
+      missingProject,
+    );
+
+    await bridge.close();
+  });
+
+  it("imports Codex Desktop workspace roots when the Pocodex registry is empty", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
+    tempDirs.push(tempDirectory);
+    const codexHome = join(tempDirectory, "codex-home");
+    await mkdir(codexHome, { recursive: true });
+    const workspaceRootRegistryPath = await writeWorkspaceRootRegistry(codexHome, {
+      roots: [],
+      labels: {},
+      activeRoot: null,
+      desktopImportPromptSeen: false,
+    });
+    const projectRoot = join(tempDirectory, "project-gamma");
+    await mkdir(projectRoot, { recursive: true });
+    await writeFile(
+      join(codexHome, ".codex-global-state.json"),
+      JSON.stringify({
+        "electron-saved-workspace-roots": [projectRoot],
+      }),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children, {
+      codexHomePath: codexHome,
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-root-options",
+      method: "POST",
+      url: "vscode://codex/workspace-root-options",
+    });
+
+    await waitForCondition(() => emittedMessages.length >= 1);
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-root-options")).toEqual({
+      roots: [projectRoot],
+      labels: {
+        [projectRoot]: "project-gamma",
+      },
+    });
+
+    await bridge.close();
+  });
+
+  it("reconciles an existing Pocodex registry with Codex Desktop project order", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-workspace-roots-"));
+    tempDirs.push(tempDirectory);
+    const codexHome = join(tempDirectory, "codex-home");
+    const projectAlpha = join(tempDirectory, "project-alpha");
+    const projectBeta = join(tempDirectory, "project-beta");
+    const browserOnlyProject = join(tempDirectory, "browser-only");
+    await mkdir(projectAlpha, { recursive: true });
+    await mkdir(projectBeta, { recursive: true });
+    await mkdir(browserOnlyProject, { recursive: true });
+    await mkdir(codexHome, { recursive: true });
+    const workspaceRootRegistryPath = await writeWorkspaceRootRegistry(codexHome, {
+      roots: [projectAlpha, browserOnlyProject, projectBeta],
+      labels: {
+        [projectAlpha]: "Old Alpha",
+        [projectBeta]: "Old Beta",
+        [browserOnlyProject]: "Browser Only",
+      },
+      activeRoot: browserOnlyProject,
+      desktopImportPromptSeen: true,
+    });
+    await writeFile(
+      join(codexHome, ".codex-global-state.json"),
+      JSON.stringify({
+        "electron-saved-workspace-roots": [projectAlpha, projectBeta],
+        "project-order": [projectBeta, projectAlpha],
+        "active-workspace-roots": [projectAlpha],
+        "electron-workspace-root-labels": {
+          [projectAlpha]: "Alpha",
+          [projectBeta]: "Beta",
+        },
+      }),
+      "utf8",
+    );
+
+    const bridge = await createBridge(children, {
+      codexHomePath: codexHome,
+      workspaceRootRegistryPath,
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-active-roots",
+      method: "POST",
+      url: "vscode://codex/active-workspace-roots",
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-root-options",
+      method: "POST",
+      url: "vscode://codex/workspace-root-options",
+    });
+
+    await waitForCondition(() => emittedMessages.length >= 2);
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-active-roots")).toEqual({
+      roots: [projectAlpha, projectBeta, browserOnlyProject],
+    });
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-root-options")).toEqual({
+      roots: [projectBeta, projectAlpha, browserOnlyProject],
+      labels: {
+        [projectAlpha]: "Alpha",
+        [projectBeta]: "Beta",
+        [browserOnlyProject]: "Browser Only",
+      },
+    });
 
     await bridge.close();
   });

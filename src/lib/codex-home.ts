@@ -22,9 +22,7 @@ export function listCodexHomePathCandidates(): string[] {
 }
 
 function isRunningInWsl(): boolean {
-  return (
-    process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
-  );
+  return Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
 }
 
 function normalizeEnvironmentPath(path: string | undefined): string | null {

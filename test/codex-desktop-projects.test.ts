@@ -76,6 +76,42 @@ describe("loadCodexDesktopProjects", () => {
     });
   });
 
+  it("uses desktop project order before saved workspace order", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-desktop-state-"));
+    tempDirs.push(tempDirectory);
+
+    const projectA = join(tempDirectory, "project-a");
+    const projectB = join(tempDirectory, "project-b");
+    const projectC = join(tempDirectory, "project-c");
+    await mkdir(projectA, { recursive: true });
+    await mkdir(projectB, { recursive: true });
+    await mkdir(projectC, { recursive: true });
+
+    const statePath = join(tempDirectory, ".codex-global-state.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        "electron-saved-workspace-roots": [projectA, projectB, projectC],
+        "project-order": [projectC, projectA],
+      }),
+      "utf8",
+    );
+
+    await expect(loadCodexDesktopProjects(statePath)).resolves.toMatchObject({
+      projects: [
+        {
+          root: projectC,
+        },
+        {
+          root: projectA,
+        },
+        {
+          root: projectB,
+        },
+      ],
+    });
+  });
+
   it("returns an empty project list when the desktop state file is missing", async () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), "pocodex-desktop-state-"));
     tempDirs.push(tempDirectory);
