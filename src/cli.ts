@@ -66,6 +66,11 @@ async function main(): Promise<void> {
   }).catch(() => null);
   const relay = await AppServerBridge.connect({
     appPath: options.appPath,
+    codexBuild: {
+      version: bundle.version,
+      buildFlavor: bundle.buildFlavor,
+      buildNumber: bundle.buildNumber,
+    },
     cwd: process.cwd(),
   });
 

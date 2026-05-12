@@ -3,9 +3,9 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const runtimeMocks = vi.hoisted(() => ({
-  connect: vi.fn(),
-  getServeUrls: vi.fn(),
-  loadCodexBundle: vi.fn(),
+  connect: vi.fn<() => Promise<unknown>>(),
+  getServeUrls: vi.fn<(...args: unknown[]) => unknown>(),
+  loadCodexBundle: vi.fn<() => Promise<unknown>>(),
   serverInstances: [] as Array<{
     close: ReturnType<typeof vi.fn>;
     getAddress: ReturnType<typeof vi.fn>;
@@ -31,14 +31,14 @@ vi.mock("../src/lib/serve-url.js", () => ({
 
 vi.mock("../src/lib/server.js", () => ({
   PocodexServer: class {
-    close = vi.fn(async () => {});
-    getAddress = vi.fn(() => ({
+    close = vi.fn<() => Promise<void>>(async () => {});
+    getAddress = vi.fn<() => { address: string; family: string; port: number }>(() => ({
       address: "127.0.0.1",
       family: "IPv4",
       port: 4321,
     }));
-    listen = vi.fn(async () => {});
-    notifyStylesheetReload = vi.fn();
+    listen = vi.fn<() => Promise<void>>(async () => {});
+    notifyStylesheetReload = vi.fn<(versionTag: string) => void>();
 
     constructor(public readonly options: unknown) {
       runtimeMocks.serverInstances.push(this);
@@ -49,11 +49,13 @@ vi.mock("../src/lib/server.js", () => ({
 import { createPocodexRuntime } from "../src/index.js";
 
 class TestRelay extends EventEmitter {
-  close = vi.fn(async () => {});
-  forwardBridgeMessage = vi.fn(async () => {});
-  sendWorkerMessage = vi.fn(async () => {});
-  subscribeWorker = vi.fn(async () => {});
-  unsubscribeWorker = vi.fn(async () => {});
+  close = vi.fn<() => Promise<void>>(async () => {});
+  forwardBridgeMessage = vi.fn<(message: unknown) => Promise<void>>(async () => {});
+  sendWorkerMessage = vi.fn<(workerName: string, message: unknown) => Promise<void>>(
+    async () => {},
+  );
+  subscribeWorker = vi.fn<(workerName: string) => Promise<void>>(async () => {});
+  unsubscribeWorker = vi.fn<(workerName: string) => Promise<void>>(async () => {});
 }
 
 describe("createPocodexRuntime", () => {
@@ -247,7 +249,9 @@ function createBundle(version: string, appPath = "/Applications/Codex.app") {
     appPath,
     buildFlavor: "prod",
     buildNumber: "123",
-    readIndexHtml: vi.fn(async () => "<!doctype html><html><body></body></html>"),
+    readIndexHtml: vi.fn<() => Promise<string>>(
+      async () => "<!doctype html><html><body></body></html>",
+    ),
     version,
     webviewRoot: "/tmp/pocodex-webview",
   };

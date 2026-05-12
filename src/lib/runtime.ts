@@ -155,6 +155,11 @@ class ManagedPocodexRuntime extends EventEmitter implements PocodexRuntime {
 
       relay = await AppServerBridge.connect({
         appPath: this.options.appPath,
+        codexBuild: {
+          version: bundle.version,
+          buildFlavor: bundle.buildFlavor,
+          buildNumber: bundle.buildNumber,
+        },
         cwd: this.options.cwd,
       });
 

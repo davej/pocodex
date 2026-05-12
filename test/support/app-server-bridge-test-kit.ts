@@ -10,12 +10,12 @@ vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
   return {
     ...actual,
-    spawn: vi.fn(),
+    spawn: vi.fn<typeof import("node:child_process").spawn>(),
   };
 });
 
 vi.mock("node-pty", () => ({
-  spawn: vi.fn(),
+  spawn: vi.fn<typeof import("node-pty").spawn>(),
 }));
 
 export const mockLocalThreadList = { data: [] as unknown[] };
@@ -250,6 +250,11 @@ export function describeAppServerBridge(
 export async function createBridge(
   children: MockChildProcess[],
   options: {
+    codexBuild?: {
+      version: string;
+      buildFlavor: string;
+      buildNumber: string;
+    };
     codexHomePath?: string;
     persistedAtomRegistryPath?: string;
     workspaceRootRegistryPath?: string;
@@ -278,6 +283,7 @@ export async function createBridge(
   }
   return AppServerBridge.connect({
     appPath: "/Applications/Codex.app",
+    codexBuild: options.codexBuild,
     codexCliPath: "/tmp/mock-codex",
     cwd: TEST_WORKSPACE_ROOT,
     codexHomePath: options.codexHomePath,
