@@ -20,7 +20,13 @@ import {
 
 describeAppServerBridge(({ children }) => {
   it("initializes the codex app-server and forwards MCP traffic", async () => {
-    const bridge = await createBridge(children);
+    const bridge = await createBridge(children, {
+      codexBuild: {
+        version: "26.313.5234.0",
+        buildFlavor: "stable",
+        buildNumber: "5234",
+      },
+    });
 
     const emittedMessages: unknown[] = [];
     bridge.on("bridge_message", (message) => {
@@ -36,6 +42,7 @@ describeAppServerBridge(({ children }) => {
     const written = child?.writes ?? "";
     expect(written).toContain('"method":"initialize"');
     expect(written).toContain('"method":"initialized"');
+    expect(written).toContain('"version":"26.313.5234.0"');
 
     await bridge.forwardBridgeMessage({
       type: "mcp-request",

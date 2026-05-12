@@ -6,9 +6,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const asarMock = vi.hoisted(() => ({
-  extractFile: vi.fn((_appAsarPath: string, _filename: string) => Buffer.alloc(0)),
-  listPackage: vi.fn((_appAsarPath: string, _options: { isPack: boolean }) => [] as string[]),
-  statFile: vi.fn(),
+  extractFile: vi.fn<typeof import("@electron/asar").extractFile>(
+    (_appAsarPath: string, _filename: string) => Buffer.alloc(0),
+  ),
+  listPackage: vi.fn<typeof import("@electron/asar").listPackage>(
+    (_appAsarPath: string, _options: { isPack: boolean }) => [] as string[],
+  ),
+  statFile: vi.fn<typeof import("@electron/asar").statFile>(),
 }));
 vi.mock("@electron/asar", () => asarMock);
 

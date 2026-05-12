@@ -7,7 +7,7 @@ import { arch, homedir, platform } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-import { ensureCodexCliBinary } from "./codex-bundle.js";
+import { ensureCodexCliBinary, type CodexBundle } from "./codex-bundle.js";
 import { deriveCodexHomePath } from "./codex-home.js";
 import {
   DefaultCodexDesktopGitWorkerBridge,
@@ -45,6 +45,7 @@ import {
 interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
+  codexBuild?: Pick<CodexBundle, "version" | "buildFlavor" | "buildNumber">;
   hostId?: string;
   codexHomePath?: string;
   persistedAtomRegistryPath?: string;
@@ -271,6 +272,7 @@ const LOCAL_UNSUPPORTED_FETCH_BODY = {
 
 export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly child: ChildProcessWithoutNullStreams;
+  private readonly codexBuild: Pick<CodexBundle, "version" | "buildFlavor" | "buildNumber">;
   private readonly hostId: string;
   private readonly cwd: string;
   private readonly terminalManager: TerminalSessionManager;
@@ -315,6 +317,11 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
 
   private constructor(options: AppServerBridgeOptions) {
     super();
+    this.codexBuild = options.codexBuild ?? {
+      version: "0.1.0",
+      buildFlavor: "pocodex",
+      buildNumber: "0",
+    };
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
     this.codexHomePath = options.codexHomePath ?? deriveCodexHomePath();
@@ -821,7 +828,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       clientInfo: {
         name: "pocodex",
         title: "Pocodex",
-        version: "0.1.0",
+        version: this.codexBuild.version,
       },
       capabilities: {
         experimentalApi: true,
@@ -1811,11 +1818,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "extension-info":
         return {
           status: 200,
-          body: {
-            version: "0.1.0",
-            buildFlavor: "pocodex",
-            buildNumber: "0",
-          },
+          body: this.codexBuild,
         };
       case "is-copilot-api-available":
         return {

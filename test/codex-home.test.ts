@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { deriveCodexHomePath } from "../src/lib/codex-home.js";
 
 vi.mock("node:child_process", () => ({
-  execFileSync: vi.fn(),
+  execFileSync: vi.fn<typeof import("node:child_process").execFileSync>(),
 }));
 
 describe("deriveCodexHomePath", () => {

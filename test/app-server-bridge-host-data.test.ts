@@ -131,6 +131,39 @@ describeAppServerBridge(({ children }) => {
     await bridge.close();
   });
 
+  it("reports the active Codex desktop build from extension-info", async () => {
+    const bridge = await createBridge(children, {
+      codexBuild: {
+        version: "26.313.5234.0",
+        buildFlavor: "stable",
+        buildNumber: "5234",
+      },
+    });
+    const emittedMessages: unknown[] = [];
+    bridge.on("bridge_message", (message) => {
+      emittedMessages.push(message);
+    });
+
+    await bridge.forwardBridgeMessage({
+      type: "fetch",
+      requestId: "fetch-extension-info",
+      method: "POST",
+      url: "vscode://codex/extension-info",
+    });
+
+    await waitForCondition(() =>
+      Boolean(getFetchResponse(emittedMessages, "fetch-extension-info")),
+    );
+
+    expect(getFetchJsonBody(emittedMessages, "fetch-extension-info")).toEqual({
+      version: "26.313.5234.0",
+      buildFlavor: "stable",
+      buildNumber: "5234",
+    });
+
+    await bridge.close();
+  });
+
   it("generates thread titles for host fetch requests", async () => {
     const bridge = await createBridge(children);
     const emittedMessages: unknown[] = [];
